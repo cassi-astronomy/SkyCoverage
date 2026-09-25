@@ -27,4 +27,5 @@ V tomto souboru jsou zaznamenány významné změny projektu SkyCoverage.
 - Data Sky Coverage se načítají pouze z ručně rozbalené místní složky; program už nestahuje `skycov.tgz` z MPC.
 - Při načtení se uchovává posledních 62 dní od nejnovějšího `.DAT` souboru a starší soubory se mažou.
 - Po vyčištění dat se odstraní také prázdné podadresáře observatoří; kořenová složka `skycov` vždy zůstane zachovaná.
+- `.DAT` soubory bez podporovaného data v názvu se odstraní, protože je program nedokáže zařadit ani zobrazit.
 - Ovladač „Dny zpět“ je omezený na uchovávaných 62 dní a tlačítko se jmenuje „Načíst data“.

@@ -115,33 +115,51 @@ class PointingDataReader(QThread):
             self.finished.emit(([], None))
             return
 
+        data_root = os.path.normcase(os.path.abspath(self.dir_path))
         all_files = []
+        invalid_files = []
         for root, _, files in os.walk(self.dir_path):
             stn_code = os.path.basename(root)
             for file in files:
                 if file.lower().endswith('.dat'):
+                    filepath = os.path.join(root, file)
                     dt = self.parse_mpc_date(file)
                     if dt:
-                        all_files.append((dt, os.path.join(root, file), stn_code))
+                        all_files.append((dt, filepath, stn_code))
+                    else:
+                        invalid_files.append(filepath)
+
+        removed_count = 0
+        removed_bytes = 0
+        removal_errors = 0
+        for filepath in invalid_files:
+            try:
+                absolute_path = os.path.normcase(os.path.abspath(filepath))
+                if os.path.commonpath([data_root, absolute_path]) != data_root:
+                    raise ValueError("Soubor leží mimo datovou složku")
+                file_size = os.path.getsize(filepath)
+                os.remove(filepath)
+                removed_count += 1
+                removed_bytes += file_size
+            except FileNotFoundError:
+                continue
+            except (OSError, ValueError):
+                removal_errors += 1
 
         if not all_files:
             removed_dirs, directory_errors = self.remove_empty_data_directories()
-            self.progress.emit("Nenalezeny žádné .dat soubory!")
-            if removed_dirs or directory_errors:
-                self.progress.emit(
-                    f"Odstraněno prázdných složek: {removed_dirs}. "
-                    f"Chyby: {directory_errors}."
-                )
+            self.progress.emit(
+                "Nenalezeny žádné platně datované .dat soubory! "
+                f"Odstraněno neplatných souborů: {removed_count}. "
+                f"Odstraněno prázdných složek: {removed_dirs}. "
+                f"Chyby: {removal_errors + directory_errors}."
+            )
             self.finished.emit(([], None))
             return
 
         max_date = max(pair[0] for pair in all_files)
         retention_date = max_date - timedelta(days=SKYCOV_RETENTION_DAYS)
-        data_root = os.path.normcase(os.path.abspath(self.dir_path))
         retained_files = []
-        removed_count = 0
-        removed_bytes = 0
-        removal_errors = 0
         for record in all_files:
             dt, filepath, _ = record
             if dt >= retention_date:

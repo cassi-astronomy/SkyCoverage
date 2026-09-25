@@ -286,10 +286,21 @@ class MainWindow(QMainWindow):
         self.kreutz_check.stateChanged.connect(self.request_redraw)
         control_panel1.addWidget(self.kreutz_check)
 
-        self.coord_label = QLabel("Pos: --")
-        self.coord_label.setWordWrap(True)
-        self.coord_label.setMinimumWidth(360)
-        self.coord_label.setStyleSheet("color: #00ffcc; font-weight: bold; font-family: monospace;")
+        self.coord_label = QLabel(
+            "Az: -- | Alt: --\n"
+            "RA: -- | Dec: --\n"
+            "Elongace: --"
+        )
+        self.coord_label.setTextFormat(Qt.TextFormat.PlainText)
+        self.coord_label.setWordWrap(False)
+        self.coord_label.setFixedSize(360, 64)
+        self.coord_label.setAlignment(
+            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
+        )
+        self.coord_label.setStyleSheet(
+            "color: #00ffcc; font-weight: bold; "
+            "font-family: monospace; font-size: 11px;"
+        )
         control_panel1.addStretch()
         control_panel1.addWidget(self.coord_label)
 
@@ -545,11 +556,19 @@ class MainWindow(QMainWindow):
         else:
             azimuth = None
             if self.projection_combo.currentIndex() == 1 and (x ** 2 / 8.0 + y ** 2 / 2.0 > 1.0):
-                self.coord_label.setText("Mimo platnou oblast projekce")
+                self.coord_label.setText(
+                    "Az: -- | Alt: --\n"
+                    "RA: -- | Dec: --\n"
+                    "Mimo platnou oblast projekce"
+                )
                 return
             ra, dec = self.inverse_global(x, y)
             if np.asarray(dec).item() < -90 or np.asarray(dec).item() > 90:
-                self.coord_label.setText("Mimo platnou oblast projekce")
+                self.coord_label.setText(
+                    "Az: -- | Alt: --\n"
+                    "RA: -- | Dec: --\n"
+                    "Mimo platnou oblast projekce"
+                )
                 return
             target = SkyCoord(ra=float(np.asarray(ra)) * u.deg, dec=float(np.asarray(dec)) * u.deg, frame='icrs')
 
@@ -558,10 +577,12 @@ class MainWindow(QMainWindow):
         elongation = target_altaz.separation(sun_altaz).deg
         target = target.transform_to('icrs')
         ra_hours = target.ra.deg / 15.0
-        position = f"Az: {azimuth:.1f}° | Alt: {altitude:.1f}° | " if azimuth is not None else ""
+        display_azimuth = float(target_altaz.az.deg)
+        display_altitude = float(target_altaz.alt.deg)
         self.coord_label.setText(
-            f"{position}RA: {int(ra_hours):02d}h {int((ra_hours % 1) * 60):02d}m "
-            f"({target.ra.deg:.1f}°) | Dec: {target.dec.deg:+.1f}°<br>"
+            f"Az: {display_azimuth:5.1f}° | Alt: {display_altitude:+5.1f}°\n"
+            f"RA: {int(ra_hours):02d}h {int((ra_hours % 1) * 60):02d}m "
+            f"| Dec: {target.dec.deg:+5.1f}°\n"
             f"Elongace: {elongation:.1f}°"
         )
 

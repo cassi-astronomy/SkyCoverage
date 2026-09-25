@@ -21,3 +21,4 @@ V tomto souboru jsou zaznamenány významné změny projektu SkyCoverage.
 ### Změněno
 
 - Nebeský rovník je světle modrý a plný, zatímco ekliptika je výrazně oranžová a čárkovaná.
+- Souřadnicový panel má pevnou velikost a samostatné řádky pro Az/Alt, RA/Dec a elongaci.

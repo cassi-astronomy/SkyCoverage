@@ -16,3 +16,7 @@ V tomto souboru jsou zaznamenány významné změny projektu SkyCoverage.
 - Odsazení v `update_axis_ticks`, které způsobovalo `IndentationError` a bránilo spuštění programu.
 - Nastavení os globálního pohledu, které bylo kvůli předčasnému `return` nedosažitelné.
 - Rozbalování `skycov.tgz`, které mohlo vytvářet chybnou strukturu `skycov/skycov`.
+
+### Změněno
+
+- Nebeský rovník je světle modrý a plný, zatímco ekliptika je výrazně oranžová a čárkovaná.

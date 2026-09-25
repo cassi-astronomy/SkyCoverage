@@ -821,6 +821,13 @@ class MainWindow(QMainWindow):
         self.add_curve(grid_x, grid_y, pg.mkPen(color=(100, 120, 140, 70), width=0.6))
 
     def add_reference_circles(self, frame_altaz, is_local):
+        equator_pen = pg.mkPen(color=(80, 220, 255, 210), width=1.3)
+        ecliptic_pen = pg.mkPen(
+            color=(255, 155, 35, 240),
+            width=2.0,
+            style=Qt.PenStyle.DashLine,
+        )
+
         if is_local:
             ra = np.linspace(0, 360, 361)
             dec = np.zeros_like(ra)
@@ -834,11 +841,16 @@ class MainWindow(QMainWindow):
                         append_projected_segment(equator_x, equator_y, line_x[0], line_y[0], line_x[1], line_y[1])
                     else:
                         append_sky_segment(equator_x, equator_y, line_x[0], line_y[0], line_x[1], line_y[1])
-            self.add_curve(equator_x, equator_y, pg.mkPen(color=(80, 220, 255, 180), width=1.2), 4)
+            self.add_curve(equator_x, equator_y, equator_pen, 4)
         else:
             equator_ra = np.linspace(0, 360, 361)
             equator_x, equator_y = self.project_global(equator_ra, np.zeros_like(equator_ra))
-            self.add_curve(equator_x.tolist() + [np.nan], equator_y.tolist() + [np.nan], pg.mkPen(color=(80, 220, 255, 180), width=1.2), 4)
+            self.add_curve(
+                equator_x.tolist() + [np.nan],
+                equator_y.tolist() + [np.nan],
+                equator_pen,
+                4,
+            )
 
         longitude = np.linspace(0, 360, 361)
         obliquity = np.radians(23.4393)
@@ -865,7 +877,7 @@ class MainWindow(QMainWindow):
             ecliptic_x = ecliptic_x.tolist() + [np.nan]
             ecliptic_y = ecliptic_y.tolist() + [np.nan]
 
-        self.add_curve(ecliptic_x, ecliptic_y, pg.mkPen(color=(235, 80, 80, 220), width=1.5), 4)
+        self.add_curve(ecliptic_x, ecliptic_y, ecliptic_pen, 4)
 
         galactic = SkyCoord(l=np.linspace(0, 360, 361) * u.deg, b=np.zeros(361) * u.deg, frame=Galactic).icrs
         if is_local:

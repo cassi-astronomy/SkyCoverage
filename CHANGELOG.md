@@ -2,6 +2,13 @@
 
 V tomto souboru jsou zaznamenány významné změny projektu SkyCoverage.
 
+## 2026-09-26
+
+### Přidáno
+
+- Volitelná vrstva hranic 88 souhvězdí v globálním i lokálním zobrazení.
+- Přepínač „Hranice souhvězdí“, kterým lze novou vrstvu kdykoliv skrýt.
+
 ## 2026-09-25
 
 ### Přidáno

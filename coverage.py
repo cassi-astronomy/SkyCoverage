@@ -273,6 +273,7 @@ class MainWindow(QMainWindow):
 
         self.selected_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "skycov")
         self.const_lines = self.load_constellation_lines()
+        self.const_boundaries = self.load_constellation_boundaries()
 
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
@@ -391,6 +392,15 @@ class MainWindow(QMainWindow):
             button.clicked.connect(lambda checked=False, delta=minutes: self.shift_time(delta))
             control_panel2.addWidget(button)
 
+        self.const_boundaries_check = QCheckBox("Hranice souhvězdí")
+        self.const_boundaries_check.setChecked(True)
+        self.const_boundaries_check.setToolTip(
+            "Zobrazit nebo skrýt oficiální hranice 88 souhvězdí"
+        )
+        self.const_boundaries_check.setStyleSheet("color: #80b89e; font-weight: bold;")
+        self.const_boundaries_check.stateChanged.connect(self.request_redraw)
+        control_panel2.addWidget(self.const_boundaries_check)
+
         control_panel2.addStretch()
         main_layout.addLayout(control_panel2)
 
@@ -434,13 +444,12 @@ class MainWindow(QMainWindow):
         self.update_axis_ticks()
         self.start_processing()
 
-    def load_constellation_lines(self):
+    def load_cached_geojson(self, filename, url):
         cache_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "astro_cache")
         os.makedirs(cache_dir, exist_ok=True)
-        json_path = os.path.join(cache_dir, "constellations.lines.json")
+        json_path = os.path.join(cache_dir, filename)
 
         if not os.path.exists(json_path):
-            url = "https://raw.githubusercontent.com/ofrohn/d3-celestial/master/data/constellations.lines.json"
             try:
                 req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
                 with urllib.request.urlopen(req, timeout=10) as resp:
@@ -451,19 +460,42 @@ class MainWindow(QMainWindow):
 
         try:
             with open(json_path, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-            lines_coords = []
-            for feature in data.get("features", []):
-                geom = feature.get("geometry", {})
-                gtype = geom.get("type", "")
-                coords = geom.get("coordinates", [])
-                if gtype == "MultiLineString":
-                    lines_coords.extend(coords)
-                elif gtype == "LineString":
-                    lines_coords.append(coords)
-            return lines_coords
+                return json.load(f)
         except Exception:
-            return []
+            return {}
+
+    def load_constellation_lines(self):
+        data = self.load_cached_geojson(
+            "constellations.lines.json",
+            "https://raw.githubusercontent.com/ofrohn/d3-celestial/master/data/constellations.lines.json",
+        )
+        lines_coords = []
+        for feature in data.get("features", []):
+            geom = feature.get("geometry", {})
+            gtype = geom.get("type", "")
+            coords = geom.get("coordinates", [])
+            if gtype == "MultiLineString":
+                lines_coords.extend(coords)
+            elif gtype == "LineString":
+                lines_coords.append(coords)
+        return lines_coords
+
+    def load_constellation_boundaries(self):
+        data = self.load_cached_geojson(
+            "constellations.bounds.json",
+            "https://raw.githubusercontent.com/ofrohn/d3-celestial/master/data/constellations.bounds.json",
+        )
+        boundaries = []
+        for feature in data.get("features", []):
+            geom = feature.get("geometry", {})
+            gtype = geom.get("type", "")
+            coords = geom.get("coordinates", [])
+            if gtype == "Polygon":
+                boundaries.extend(coords)
+            elif gtype == "MultiPolygon":
+                for polygon in coords:
+                    boundaries.extend(polygon)
+        return boundaries
 
     def set_twilight(self, target_alt_deg, evening=True):
         """Nastaví dnešní večerní nebo následující ranní soumrak v UTC."""
@@ -878,6 +910,70 @@ class MainWindow(QMainWindow):
                 label.setPos(x, y)
                 self.plot_widget.addItem(label)
 
+    def add_constellation_boundaries(self, frame_altaz, is_local):
+        if not self.const_boundaries_check.isChecked() or not self.const_boundaries:
+            return
+
+        boundary_arrays = []
+        for boundary in self.const_boundaries:
+            coordinates = np.asarray(boundary, dtype=float)
+            if coordinates.ndim == 2 and coordinates.shape[0] >= 2 and coordinates.shape[1] >= 2:
+                boundary_arrays.append(coordinates[:, :2])
+
+        if not boundary_arrays:
+            return
+
+        transformed = None
+        if is_local:
+            all_ra = np.concatenate([coordinates[:, 0] % 360.0 for coordinates in boundary_arrays])
+            all_dec = np.concatenate([coordinates[:, 1] for coordinates in boundary_arrays])
+            transformed = self.transform_coords(all_ra, all_dec, frame_altaz)
+
+        boundary_x, boundary_y = [], []
+        offset = 0
+        hammer = self.projection_combo.currentIndex() == 1
+        for coordinates in boundary_arrays:
+            point_count = len(coordinates)
+            if is_local:
+                azimuth = transformed[0][offset:offset + point_count]
+                altitude = transformed[1][offset:offset + point_count]
+                offset += point_count
+                x_values, y_values = self.project_local(
+                    self.local_azimuth(azimuth), altitude
+                )
+            else:
+                altitude = None
+                x_values, y_values = self.project_global(
+                    coordinates[:, 0], coordinates[:, 1]
+                )
+
+            for index in range(point_count - 1):
+                if is_local and altitude[index] < 0.0 and altitude[index + 1] < 0.0:
+                    continue
+                if hammer:
+                    append_projected_segment(
+                        boundary_x, boundary_y,
+                        x_values[index], y_values[index],
+                        x_values[index + 1], y_values[index + 1],
+                    )
+                else:
+                    append_sky_segment(
+                        boundary_x, boundary_y,
+                        x_values[index], y_values[index],
+                        x_values[index + 1], y_values[index + 1],
+                    )
+
+        self.add_curve(
+            boundary_x,
+            boundary_y,
+            pg.mkPen(
+                color=(115, 160, 135, 125),
+                width=0.8,
+                style=Qt.PenStyle.DashLine,
+            ),
+            3,
+        )
+
     def add_curve(self, x_values, y_values, pen, z_value=0):
         if len(x_values) == 0:
             return
@@ -1105,6 +1201,7 @@ class MainWindow(QMainWindow):
 
         self.add_reference_grid(frame_altaz, is_local)
         self.add_reference_circles(frame_altaz, is_local)
+        self.add_constellation_boundaries(frame_altaz, is_local)
 
         if self.stars:
             star_ra = np.array([star[0] for star in self.stars])

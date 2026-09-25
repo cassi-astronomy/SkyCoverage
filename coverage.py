@@ -85,6 +85,29 @@ class PointingDataReader(QThread):
             return None
         return None
 
+    def remove_empty_data_directories(self):
+        """Remove empty subdirectories while always preserving the skycov root."""
+        data_root = os.path.normcase(os.path.abspath(self.dir_path))
+        removed_count = 0
+        removal_errors = 0
+        for current_root, _, _ in os.walk(self.dir_path, topdown=False):
+            absolute_root = os.path.normcase(os.path.abspath(current_root))
+            if absolute_root == data_root:
+                continue
+            try:
+                if os.path.commonpath([data_root, absolute_root]) != data_root:
+                    raise ValueError("Adresář leží mimo datovou složku")
+                if not os.listdir(current_root):
+                    os.rmdir(current_root)
+                    removed_count += 1
+            except FileNotFoundError:
+                # Jiná spuštěná instance mohla stejnou prázdnou složku
+                # odstranit mezi os.walk() a os.rmdir().
+                continue
+            except (OSError, ValueError):
+                removal_errors += 1
+        return removed_count, removal_errors
+
     def run(self):
         self.progress.emit("Indexuji místní archiv skycov...")
         if not self.dir_path or not os.path.exists(self.dir_path):
@@ -102,7 +125,13 @@ class PointingDataReader(QThread):
                         all_files.append((dt, os.path.join(root, file), stn_code))
 
         if not all_files:
+            removed_dirs, directory_errors = self.remove_empty_data_directories()
             self.progress.emit("Nenalezeny žádné .dat soubory!")
+            if removed_dirs or directory_errors:
+                self.progress.emit(
+                    f"Odstraněno prázdných složek: {removed_dirs}. "
+                    f"Chyby: {directory_errors}."
+                )
             self.finished.emit(([], None))
             return
 
@@ -126,18 +155,25 @@ class PointingDataReader(QThread):
                 os.remove(filepath)
                 removed_count += 1
                 removed_bytes += file_size
+            except FileNotFoundError:
+                # Souběžné načtení v jiné instanci mohlo soubor odstranit dříve.
+                continue
             except (OSError, ValueError):
                 removal_errors += 1
                 retained_files.append(record)
 
         all_files = retained_files
+        removed_dirs, directory_errors = self.remove_empty_data_directories()
         min_date = max_date - timedelta(days=self.days_back)
         target_files = [p for p in all_files if min_date <= p[0] <= max_date]
 
         removed_mb = removed_bytes / (1024 * 1024)
         cleanup_status = f" Odstraněno: {removed_count} souborů ({removed_mb:.1f} MiB)."
+        cleanup_status += f" Prázdné složky: {removed_dirs}."
         if removal_errors:
-            cleanup_status += f" Nešlo odstranit: {removal_errors}."
+            cleanup_status += f" Nešlo odstranit souborů: {removal_errors}."
+        if directory_errors:
+            cleanup_status += f" Nešlo odstranit složek: {directory_errors}."
         self.progress.emit(f"Načítám {len(target_files)} souborů.{cleanup_status}")
 
         polygons = []

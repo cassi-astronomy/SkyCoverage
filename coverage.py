@@ -897,10 +897,12 @@ class MainWindow(QMainWindow):
             for altitude in range(-30, 90, 10):
                 if altitude == 0:
                     color, width, z_value = (170, 105, 45, 230), 2.5, 12
+                elif altitude < 0:
+                    color, width, z_value = (165, 120, 80, 75), 0.65, 9
                 elif altitude % 30 == 0:
-                    color, width, z_value = (220, 150, 70, 140), 1.0, 11
+                    color, width, z_value = (235, 165, 80, 160), 1.05, 11
                 else:
-                    color, width, z_value = (180, 130, 85, 70), 0.55, 10
+                    color, width, z_value = (220, 150, 75, 135), 0.9, 10
                 circle_az = self.local_azimuth(az_samples)
                 cx, cy = self.project_local(circle_az, np.full_like(circle_az, altitude))
 

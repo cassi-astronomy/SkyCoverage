@@ -4,8 +4,6 @@ import json
 import csv
 import gzip
 import urllib.request
-import tarfile
-import io
 from datetime import datetime, timedelta, timezone
 import numpy as np
 
@@ -28,6 +26,8 @@ OBSERVATORIES = {
     'I05 - Paranal (CL)': EarthLocation.from_geodetic(-70.4042, -24.6272, 2635),
     'I47 - Pierre Auger (AR)': EarthLocation.from_geodetic(-69.3158, -35.2060, 1400)
 }
+
+SKYCOV_RETENTION_DAYS = 62
 
 
 def append_sky_segment(x_values, y_values, x1, y1, x2, y2):
@@ -65,40 +65,10 @@ class PointingDataReader(QThread):
     finished = pyqtSignal(object)
     progress = pyqtSignal(str)
 
-    def __init__(self, dir_path, days_back, auto_download=True):
+    def __init__(self, dir_path, days_back):
         super().__init__()
         self.dir_path = dir_path
         self.days_back = days_back
-        self.auto_download = auto_download
-
-    def download_latest_data(self):
-        url = "https://minorplanetcenter.net/iau/skycov.tgz"
-        self.progress.emit("Stahuji nejnovější data z MPC (skycov.tgz)...")
-        try:
-            os.makedirs(self.dir_path, exist_ok=True)
-            req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
-            with urllib.request.urlopen(req, timeout=30) as response:
-                compressed_data = response.read()
-
-            with tarfile.open(fileobj=io.BytesIO(compressed_data), mode="r:gz") as tar:
-                # Archiv už obsahuje kořenovou složku "skycov". Rozbalení
-                # přímo do self.dir_path by proto vytvářelo skycov/skycov.
-                extract_root = os.path.dirname(os.path.abspath(self.dir_path))
-                target_root = os.path.normcase(os.path.abspath(self.dir_path))
-                members = tar.getmembers()
-                for member in members:
-                    destination = os.path.normcase(os.path.abspath(
-                        os.path.join(extract_root, member.name)
-                    ))
-                    if os.path.commonpath([target_root, destination]) != target_root:
-                        raise ValueError(f"Nepovolená cesta v archivu: {member.name}")
-                    if not (member.isfile() or member.isdir()):
-                        raise ValueError(f"Nepovolený typ položky v archivu: {member.name}")
-                tar.extractall(path=extract_root, members=members)
-            return True
-        except Exception as e:
-            self.progress.emit(f"Chyba při stahování: {e}")
-            return False
 
     def parse_mpc_date(self, filename):
         base = os.path.basename(filename).split('.')[0].strip()
@@ -116,9 +86,6 @@ class PointingDataReader(QThread):
         return None
 
     def run(self):
-        if self.auto_download:
-            self.download_latest_data()
-
         self.progress.emit("Indexuji místní archiv skycov...")
         if not self.dir_path or not os.path.exists(self.dir_path):
             self.progress.emit("Chyba: Složka neexistuje!")
@@ -140,10 +107,38 @@ class PointingDataReader(QThread):
             return
 
         max_date = max(pair[0] for pair in all_files)
+        retention_date = max_date - timedelta(days=SKYCOV_RETENTION_DAYS)
+        data_root = os.path.normcase(os.path.abspath(self.dir_path))
+        retained_files = []
+        removed_count = 0
+        removed_bytes = 0
+        removal_errors = 0
+        for record in all_files:
+            dt, filepath, _ = record
+            if dt >= retention_date:
+                retained_files.append(record)
+                continue
+            try:
+                absolute_path = os.path.normcase(os.path.abspath(filepath))
+                if os.path.commonpath([data_root, absolute_path]) != data_root:
+                    raise ValueError("Soubor leží mimo datovou složku")
+                file_size = os.path.getsize(filepath)
+                os.remove(filepath)
+                removed_count += 1
+                removed_bytes += file_size
+            except (OSError, ValueError):
+                removal_errors += 1
+                retained_files.append(record)
+
+        all_files = retained_files
         min_date = max_date - timedelta(days=self.days_back)
         target_files = [p for p in all_files if min_date <= p[0] <= max_date]
 
-        self.progress.emit(f"Načítám {len(target_files)} souborů...")
+        removed_mb = removed_bytes / (1024 * 1024)
+        cleanup_status = f" Odstraněno: {removed_count} souborů ({removed_mb:.1f} MiB)."
+        if removal_errors:
+            cleanup_status += f" Nešlo odstranit: {removal_errors}."
+        self.progress.emit(f"Načítám {len(target_files)} souborů.{cleanup_status}")
 
         polygons = []
         for dt, filepath, stn in target_files:
@@ -176,7 +171,10 @@ class PointingDataReader(QThread):
                 continue
 
         ref_time = Time(max_date)
-        self.progress.emit("Připraveno.")
+        self.progress.emit(
+            f"Připraveno. Nejnovější MPC data: {max_date:%Y-%m-%d}."
+            f"{cleanup_status}"
+        )
         self.finished.emit((polygons, ref_time))
 
 
@@ -260,7 +258,7 @@ class MainWindow(QMainWindow):
 
         control_panel1.addWidget(QLabel("Dny zpět:"))
         self.days_spin = QSpinBox()
-        self.days_spin.setRange(1, 365)
+        self.days_spin.setRange(1, SKYCOV_RETENTION_DAYS)
         self.days_spin.setValue(30)
         self.days_spin.setStyleSheet(spin_style)
         control_panel1.addWidget(self.days_spin)
@@ -273,7 +271,7 @@ class MainWindow(QMainWindow):
         self.mag_spin.setStyleSheet(spin_style)
         control_panel1.addWidget(self.mag_spin)
 
-        self.btn_load = QPushButton("Obnovit data")
+        self.btn_load = QPushButton("Načíst data")
         self.btn_load.setStyleSheet("background-color: #008844; color: white; padding: 6px 12px; font-weight: bold;")
         self.btn_load.clicked.connect(self.start_processing)
         control_panel1.addWidget(self.btn_load)
@@ -595,7 +593,7 @@ class MainWindow(QMainWindow):
 
     def start_processing(self):
         self.btn_load.setEnabled(False)
-        self.reader = PointingDataReader(self.selected_dir, self.days_spin.value(), auto_download=True)
+        self.reader = PointingDataReader(self.selected_dir, self.days_spin.value())
         self.reader.progress.connect(self.status_label.setText)
         self.reader.finished.connect(self.on_data_loaded)
         self.reader.start()

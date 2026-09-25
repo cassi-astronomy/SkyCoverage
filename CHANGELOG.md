@@ -16,6 +16,7 @@ V tomto souboru jsou zaznamenány významné změny projektu SkyCoverage.
 - Odsazení v `update_axis_ticks`, které způsobovalo `IndentationError` a bránilo spuštění programu.
 - Nastavení os globálního pohledu, které bylo kvůli předčasnému `return` nedosažitelné.
 - Rozbalování `skycov.tgz`, které mohlo vytvářet chybnou strukturu `skycov/skycov`.
+- Falešná vodorovná čára vznikající propojením konců kružnice sluneční elongace přes přechod RA 0°/360°.
 
 ### Změněno
 

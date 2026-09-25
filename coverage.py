@@ -873,9 +873,21 @@ class MainWindow(QMainWindow):
                 else:
                     append_sky_segment(ecliptic_x, ecliptic_y, line_x[0], line_y[0], line_x[1], line_y[1])
         else:
-            ecliptic_x, ecliptic_y = self.project_global(ecliptic_ra, ecliptic_dec)
-            ecliptic_x = ecliptic_x.tolist() + [np.nan]
-            ecliptic_y = ecliptic_y.tolist() + [np.nan]
+            projected_x, projected_y = self.project_global(ecliptic_ra, ecliptic_dec)
+            ecliptic_x, ecliptic_y = [], []
+            for index in range(len(projected_x) - 1):
+                if self.projection_combo.currentIndex() == 1:
+                    append_projected_segment(
+                        ecliptic_x, ecliptic_y,
+                        projected_x[index], projected_y[index],
+                        projected_x[index + 1], projected_y[index + 1],
+                    )
+                else:
+                    append_sky_segment(
+                        ecliptic_x, ecliptic_y,
+                        projected_x[index], projected_y[index],
+                        projected_x[index + 1], projected_y[index + 1],
+                    )
 
         self.add_curve(ecliptic_x, ecliptic_y, ecliptic_pen, 4)
 
@@ -1009,7 +1021,22 @@ class MainWindow(QMainWindow):
                             line_x[0], line_y[0], line_x[1], line_y[1])
                 x_c, y_c = np.asarray(projected_x), np.asarray(projected_y)
             else:
-                x_c, y_c = self.project_global(ra_deg_c, dec_deg_c)
+                raw_x, raw_y = self.project_global(ra_deg_c, dec_deg_c)
+                projected_x, projected_y = [], []
+                for index in range(len(raw_x) - 1):
+                    if self.projection_combo.currentIndex() == 1:
+                        append_projected_segment(
+                            projected_x, projected_y,
+                            raw_x[index], raw_y[index],
+                            raw_x[index + 1], raw_y[index + 1],
+                        )
+                    else:
+                        append_sky_segment(
+                            projected_x, projected_y,
+                            raw_x[index], raw_y[index],
+                            raw_x[index + 1], raw_y[index + 1],
+                        )
+                x_c, y_c = np.asarray(projected_x), np.asarray(projected_y)
 
             if len(x_c) > 0:
                 color, style = elongation_styles[elongation]

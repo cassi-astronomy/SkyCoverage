@@ -332,7 +332,7 @@ class MainWindow(QMainWindow):
 
         self.kreutz_check = QCheckBox("Kreutzův koridor I/II")
         self.kreutz_check.setToolTip(
-            "Model koridorů Kreutz I a II pro 10, 15, 20, 30 a 45 dní před přísluním"
+            "Model koridorů Kreutz I a II pro 5, 10, 15, 20, 30 a 45 dní před přísluním"
         )
         self.kreutz_check.setStyleSheet("color: #ff9966; font-weight: bold;")
         self.kreutz_check.stateChanged.connect(self.request_redraw)
@@ -826,7 +826,7 @@ class MainWindow(QMainWindow):
             "I": ((255, 100, 80, 210), Qt.PenStyle.DashLine),
             "II": ((190, 100, 255, 210), Qt.PenStyle.DotLine),
         }
-        days_values = [10, 15, 20, 30, 45]
+        days_values = [5, 10, 15, 20, 30, 45]
         for population, (color, line_style) in styles.items():
             corridor_x, corridor_y = [], []
             for variant in np.linspace(-2.0, 2.0, 9):
@@ -1105,7 +1105,7 @@ class MainWindow(QMainWindow):
         if not is_local or moon_altitude >= 0:
             self.plot_widget.addItem(pg.ScatterPlotItem(x=moon_x, y=moon_y, size=12, brush='#eeeeee', pen=pg.mkPen('b', width=1)))
 
-        # 2. Elongační kružnice kolem Slunce (20°, 30°, 40°, 50°, 60°)
+        # 2. Elongační kružnice kolem Slunce (20° až 70°)
         angles = np.linspace(0, 2*np.pi, 120)
         elongation_styles = {
             20: ((255, 235, 120, 190), Qt.PenStyle.SolidLine),
@@ -1113,8 +1113,9 @@ class MainWindow(QMainWindow):
             40: ((100, 220, 255, 190), Qt.PenStyle.DotLine),
             50: ((150, 255, 150, 190), Qt.PenStyle.DashDotLine),
             60: ((255, 110, 180, 190), Qt.PenStyle.DashDotDotLine),
+            70: ((180, 140, 255, 200), Qt.PenStyle.SolidLine),
         }
-        for elongation in [20, 30, 40, 50, 60]:
+        for elongation in [20, 30, 40, 50, 60, 70]:
             e_rad = np.radians(elongation)
             s_ra = np.radians(sun.ra.deg)
             s_dec = np.radians(sun.dec.deg)

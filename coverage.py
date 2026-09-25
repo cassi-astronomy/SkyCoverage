@@ -309,6 +309,7 @@ class MainWindow(QMainWindow):
 
         control_panel1.addWidget(QLabel("Čas (UTC):"))
         self.time_edit = QDateTimeEdit(QDateTime.currentDateTimeUtc())
+        self.time_edit.setTimeSpec(Qt.TimeSpec.UTC)
         self.time_edit.setDisplayFormat("yyyy-MM-dd HH:mm")
         self.time_edit.setStyleSheet("background-color: #222; color: white; padding: 4px;")
         self.time_edit.dateTimeChanged.connect(self.request_redraw)
@@ -511,10 +512,10 @@ class MainWindow(QMainWindow):
         )
         if evening:
             search_date = base_date
-            start_hour, end_hour = 12, 24
+            start_hour, end_hour = 12, 30
         else:
             search_date = base_date + timedelta(days=1)
-            start_hour, end_hour = 0, 12
+            start_hour, end_hour = 0, 18
         times = [search_date + timedelta(minutes=m) for m in range(start_hour * 60, end_hour * 60 + 1)]
 
         astropy_times = Time(times)
@@ -522,21 +523,36 @@ class MainWindow(QMainWindow):
         suns = get_sun(astropy_times).transform_to(frame)
         alts = suns.alt.deg
 
-        crossings = np.where((alts[:-1] - target_alt_deg) * (alts[1:] - target_alt_deg) <= 0)[0]
+        if evening:
+            crossings = np.where(
+                (alts[:-1] > target_alt_deg) & (alts[1:] <= target_alt_deg)
+            )[0]
+        else:
+            crossings = np.where(
+                (alts[:-1] < target_alt_deg) & (alts[1:] >= target_alt_deg)
+            )[0]
+
         if len(crossings):
-            best_idx = crossings[np.argmin(np.abs(alts[crossings] - target_alt_deg))]
+            best_idx = int(crossings[0])
+            if abs(alts[best_idx + 1] - target_alt_deg) < abs(alts[best_idx] - target_alt_deg):
+                best_idx += 1
+            best_dt = times[best_idx]
         else:
             best_idx = int(np.argmin(np.abs(alts - target_alt_deg)))
-        best_dt = times[best_idx].replace(tzinfo=timezone.utc)
+            best_dt = times[best_idx]
+        best_dt = best_dt.replace(tzinfo=timezone.utc)
 
         self.time_edit.blockSignals(True)
-        self.time_edit.setDateTime(QDateTime(best_dt))
+        self.time_edit.setDateTime(
+            QDateTime.fromSecsSinceEpoch(int(best_dt.timestamp()), Qt.TimeSpec.UTC)
+        )
         self.time_edit.blockSignals(False)
         self.redraw()
 
     def shift_time(self, minutes):
-        current = self.time_edit.dateTime().toPyDateTime()
-        self.time_edit.setDateTime(QDateTime(current + timedelta(minutes=minutes)))
+        self.time_edit.setDateTime(
+            self.time_edit.dateTime().addSecs(int(minutes * 60))
+        )
 
     def on_view_change(self):
         is_local = self.view_mode_combo.currentIndex() == 1

@@ -10,6 +10,11 @@ V tomto souboru jsou zaznamenány významné změny projektu SkyCoverage.
 - Přepínač „Hranice souhvězdí“, kterým lze novou vrstvu kdykoliv skrýt.
 - Lambertova válcová plochojevná projekce jako třetí možnost zobrazení mapy.
 
+### Opraveno
+
+- Ranní soumrak vybírá vzestup Slunce přes zadanou výšku, takže u amerických observatoří nezamění doznívající večerní soumrak krátce po 00:00 UTC za ranní.
+- Časové pole i tlačítka pro posun času zachovávají časové pásmo UTC a nepřebírají místní pásmo Windows.
+
 ## 2026-09-25
 
 ### Přidáno

@@ -332,7 +332,8 @@ class MainWindow(QMainWindow):
 
         self.kreutz_check = QCheckBox("Kreutzův koridor I/II")
         self.kreutz_check.setToolTip(
-            "Model koridorů Kreutz I a II pro 5, 10, 15, 20, 30 a 45 dní před přísluním"
+            "Model koridorů Kreutz I a II pro 5, 10, 15, 20, 30, 40 a 45 dní před přísluním; "
+            "značky ukazují 5 dní a potom intervaly po 10 dnech"
         )
         self.kreutz_check.setStyleSheet("color: #ff9966; font-weight: bold;")
         self.kreutz_check.stateChanged.connect(self.request_redraw)
@@ -826,9 +827,11 @@ class MainWindow(QMainWindow):
             "I": ((255, 100, 80, 210), Qt.PenStyle.DashLine),
             "II": ((190, 100, 255, 210), Qt.PenStyle.DotLine),
         }
-        days_values = [5, 10, 15, 20, 30, 45]
+        days_values = [5, 10, 15, 20, 30, 40, 45]
+        marker_days = {5, 10, 20, 30, 40}
         for population, (color, line_style) in styles.items():
             corridor_x, corridor_y = [], []
+            central_markers = []
             for variant in np.linspace(-2.0, 2.0, 9):
                 points_x, points_y = [], []
                 for days_before in days_values:
@@ -840,6 +843,8 @@ class MainWindow(QMainWindow):
                         x, y = self.project_global([ra], [dec])
                     points_x.append(float(x[0]))
                     points_y.append(float(y[0]))
+                    if np.isclose(variant, 0.0) and days_before in marker_days:
+                        central_markers.append((days_before, points_x[-1], points_y[-1]))
                 for index in range(len(points_x) - 1):
                     if is_local and self.projection_combo.currentIndex() == 1:
                         append_projected_segment(corridor_x, corridor_y, points_x[index], points_y[index], points_x[index + 1], points_y[index + 1], 0.5)
@@ -849,13 +854,29 @@ class MainWindow(QMainWindow):
                         append_projected_segment(corridor_x, corridor_y, points_x[index], points_y[index], points_x[index + 1], points_y[index + 1], 0.5) if self.projection_combo.currentIndex() == 1 else append_sky_segment(corridor_x, corridor_y, points_x[index], points_y[index], points_x[index + 1], points_y[index + 1])
             self.add_curve(corridor_x, corridor_y, pg.mkPen(color=color, width=1.5, style=line_style), 6)
 
+            marker_item = pg.ScatterPlotItem(
+                x=[point[1] for point in central_markers],
+                y=[point[2] for point in central_markers],
+                symbol="o",
+                size=8,
+                pen=pg.mkPen((235, 235, 245, 230), width=0.8),
+                brush=pg.mkBrush(color),
+            )
+            marker_item.setZValue(8)
+            self.plot_widget.addItem(marker_item)
 
-
-
-
-
-
-
+            label_anchor = (0.5, 1.15) if population == "I" else (0.5, -0.15)
+            for days_before, x, y in central_markers:
+                label = pg.TextItem(
+                    text=f"{days_before} d",
+                    color=color,
+                    anchor=label_anchor,
+                    border=None,
+                    fill=None,
+                )
+                label.setZValue(9)
+                label.setPos(x, y)
+                self.plot_widget.addItem(label)
 
     def add_curve(self, x_values, y_values, pen, z_value=0):
         if len(x_values) == 0:

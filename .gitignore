@@ -1,0 +1,13 @@
+__pycache__/
+*.py[cod]
+
+# Stažená data MPC a astronomické katalogy
+skycov/
+skycov.tgz
+astro_cache/
+
+# Lokální prostředí a výstupy
+.venv/
+venv/
+*.log
+

@@ -1,0 +1,17 @@
+# Přehled změn
+
+V tomto souboru jsou zaznamenány významné změny projektu SkyCoverage.
+
+## 2026-09-25
+
+### Přidáno
+
+- Verzování projektu pomocí Gitu.
+- Kontrola cest a typů položek při rozbalování archivu MPC.
+
+### Opraveno
+
+- Odsazení v `update_axis_ticks`, které způsobovalo `IndentationError` a bránilo spuštění programu.
+- Nastavení os globálního pohledu, které bylo kvůli předčasnému `return` nedosažitelné.
+- Rozbalování `skycov.tgz`, které mohlo vytvářet chybnou strukturu `skycov/skycov`.
+

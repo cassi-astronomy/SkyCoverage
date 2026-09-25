@@ -18,6 +18,7 @@ V tomto souboru jsou zaznamenány významné změny projektu SkyCoverage.
 - Rozbalování `skycov.tgz`, které mohlo vytvářet chybnou strukturu `skycov/skycov`.
 - Falešná vodorovná čára vznikající propojením konců kružnice sluneční elongace přes přechod RA 0°/360°.
 - Načtení dat MPC už nepřepisuje aktuální čas datem nejnovějšího archivního souboru.
+- Pohyb myši mimo platnou oblast lokální nebo globální projekce už neposílá Astropy souřadnice s výškou mimo rozsah −90° až +90°.
 
 ### Změněno
 

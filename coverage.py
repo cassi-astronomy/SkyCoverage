@@ -591,7 +591,10 @@ class MainWindow(QMainWindow):
         ])
 
     def on_mouse_move(self, pos):
-        mouse_point = self.plot_widget.plotItem.vb.mapSceneToView(pos)
+        view_box = self.plot_widget.plotItem.vb
+        if not view_box.sceneBoundingRect().contains(pos):
+            return
+        mouse_point = view_box.mapSceneToView(pos)
         x, y = mouse_point.x(), mouse_point.y()
         qdt = self.time_edit.dateTime().toPyDateTime()
         eval_time = Time(qdt)
@@ -599,31 +602,35 @@ class MainWindow(QMainWindow):
         frame_altaz = AltAz(obstime=eval_time, location=location)
         if self.view_mode_combo.currentIndex() == 1:
             if self.projection_combo.currentIndex() == 1:
+                if x ** 2 / 8.0 + y ** 2 / 2.0 > 1.0:
+                    self.show_invalid_coordinates()
+                    return
                 local_x, altitude = self.inverse_local_hammer(x, y)
                 azimuth = (local_x + (self.local_sun_azimuth or 0)) % 360
             else:
                 azimuth = (x + (self.local_sun_azimuth or 0) - 180) % 360
                 altitude = y
+            azimuth = float(np.asarray(azimuth))
+            altitude = float(np.asarray(altitude))
+            if (not np.isfinite(azimuth) or not np.isfinite(altitude) or
+                    altitude < -90.0 or altitude > 90.0):
+                self.show_invalid_coordinates()
+                return
             target_altaz = SkyCoord(az=azimuth * u.deg, alt=altitude * u.deg, frame=frame_altaz)
             target = target_altaz.transform_to('icrs')
         else:
             azimuth = None
             if self.projection_combo.currentIndex() == 1 and (x ** 2 / 8.0 + y ** 2 / 2.0 > 1.0):
-                self.coord_label.setText(
-                    "Az: -- | Alt: --\n"
-                    "RA: -- | Dec: --\n"
-                    "Mimo platnou oblast projekce"
-                )
+                self.show_invalid_coordinates()
                 return
             ra, dec = self.inverse_global(x, y)
-            if np.asarray(dec).item() < -90 or np.asarray(dec).item() > 90:
-                self.coord_label.setText(
-                    "Az: -- | Alt: --\n"
-                    "RA: -- | Dec: --\n"
-                    "Mimo platnou oblast projekce"
-                )
+            ra = float(np.asarray(ra))
+            dec = float(np.asarray(dec))
+            if (not np.isfinite(ra) or not np.isfinite(dec) or
+                    dec < -90.0 or dec > 90.0):
+                self.show_invalid_coordinates()
                 return
-            target = SkyCoord(ra=float(np.asarray(ra)) * u.deg, dec=float(np.asarray(dec)) * u.deg, frame='icrs')
+            target = SkyCoord(ra=ra * u.deg, dec=dec * u.deg, frame='icrs')
 
         sun_altaz = get_sun(eval_time).transform_to(frame_altaz)
         target_altaz = target.transform_to(frame_altaz)
@@ -637,6 +644,13 @@ class MainWindow(QMainWindow):
             f"RA: {int(ra_hours):02d}h {int((ra_hours % 1) * 60):02d}m "
             f"| Dec: {target.dec.deg:+5.1f}°\n"
             f"Elongace: {elongation:.1f}°"
+        )
+
+    def show_invalid_coordinates(self):
+        self.coord_label.setText(
+            "Az: -- | Alt: --\n"
+            "RA: -- | Dec: --\n"
+            "Mimo platnou oblast projekce"
         )
 
     def request_redraw(self):

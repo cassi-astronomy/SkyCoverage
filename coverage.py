@@ -917,7 +917,7 @@ class MainWindow(QMainWindow):
             az_samples = np.linspace(0, 360, 361)
             for altitude in range(-30, 90, 10):
                 if altitude == 0:
-                    color, width, z_value = (170, 105, 45, 230), 2.5, 12
+                    color, width, z_value = (185, 100, 40, 255), 4.0, 20
                 elif altitude < 0:
                     color, width, z_value = (165, 120, 80, 75), 0.65, 9
                 elif altitude % 30 == 0:

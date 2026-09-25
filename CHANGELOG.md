@@ -33,6 +33,7 @@ V tomto souboru jsou zaznamenány významné změny projektu SkyCoverage.
 - `.DAT` soubory bez podporovaného data v názvu se odstraní, protože je program nedokáže zařadit ani zobrazit.
 - Lokální mřížka obsahuje jemné čáry po 10° a výraznější čáry po 30°; popisky os se při přiblížení automaticky přepnou z 30° na 10°.
 - Výškové kružnice po 10° a 20° jsou téměř stejně jasné jako kružnice po 30°, aby zůstaly čitelné nad vykresleným pokrytím.
+- Čára obzoru je silnější, sytě hnědá a vykresluje se nad ostatními čarami oblohy.
 - Kreutzovy koridory sahají až k bodu 5 dní před přísluním.
 - Střední dráhy obou Kreutzových populací mají značky pro 5, 10, 20, 30 a 40 dní před přísluním.
 - Ovladač „Dny zpět“ je omezený na uchovávaných 62 dní a tlačítko se jmenuje „Načíst data“.

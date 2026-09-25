@@ -8,6 +8,7 @@ V tomto souboru jsou zaznamenány významné změny projektu SkyCoverage.
 
 - Volitelná vrstva hranic 88 souhvězdí v globálním i lokálním zobrazení.
 - Přepínač „Hranice souhvězdí“, kterým lze novou vrstvu kdykoliv skrýt.
+- Lambertova válcová plochojevná projekce jako třetí možnost zobrazení mapy.
 
 ## 2026-09-25
 

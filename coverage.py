@@ -28,6 +28,7 @@ OBSERVATORIES = {
 }
 
 SKYCOV_RETENTION_DAYS = 62
+LAMBERT_Y_SCALE = 180.0 / np.pi
 
 
 def append_sky_segment(x_values, y_values, x1, y1, x2, y2):
@@ -290,7 +291,11 @@ class MainWindow(QMainWindow):
 
         control_panel1.addWidget(QLabel("Projekce:"))
         self.projection_combo = QComboBox()
-        self.projection_combo.addItems(["Obdélníková", "Hammer-Aitoff"])
+        self.projection_combo.addItems([
+            "Obdélníková",
+            "Hammer-Aitoff",
+            "Válcová plochojevná",
+        ])
         self.projection_combo.setStyleSheet("background-color: #222; color: white; padding: 4px;")
         self.projection_combo.currentIndexChanged.connect(self.on_projection_change)
         control_panel1.addWidget(self.projection_combo)
@@ -535,30 +540,32 @@ class MainWindow(QMainWindow):
 
     def on_view_change(self):
         is_local = self.view_mode_combo.currentIndex() == 1
-        local_lower_altitude = -30.0
+        projection = self.projection_combo.currentIndex()
         self.plot_widget.clear()
         if is_local:
             self.plot_widget.getViewBox().invertX(False)
-            if self.projection_combo.currentIndex() == 1:
+            if projection == 1:
                 self.plot_widget.setXRange(-3, 3)
                 self.plot_widget.setYRange(-1.5, 1.5)
                 self.plot_widget.setLabel('bottom', 'Relativní azimut (střed = Slunce)')
                 self.plot_widget.setLabel('left', 'Výška Alt (stupně)')
             else:
                 self.plot_widget.setXRange(0, 360)
-                self.plot_widget.setYRange(0, 90)
+                upper_y = LAMBERT_Y_SCALE if projection == 2 else 90.0
+                self.plot_widget.setYRange(0, upper_y)
                 self.plot_widget.setLabel('bottom', 'Azimut vůči Slunci (střed = směr Slunce)')
                 self.plot_widget.setLabel('left', 'Výška nad obzorem Alt (deg)')
         else:
             self.plot_widget.getViewBox().invertX(True)
-            if self.projection_combo.currentIndex() == 1:
+            if projection == 1:
                 self.plot_widget.setXRange(-3, 3)
                 self.plot_widget.setYRange(-1.5, 1.5)
                 self.plot_widget.setLabel('bottom', 'Rektascenze RA (hodiny)')
                 self.plot_widget.setLabel('left', 'Deklinace Dec (stupně)')
             else:
                 self.plot_widget.setXRange(0, 360)
-                self.plot_widget.setYRange(-90, 90)
+                upper_y = LAMBERT_Y_SCALE if projection == 2 else 90.0
+                self.plot_widget.setYRange(-upper_y, upper_y)
                 self.plot_widget.setLabel('bottom', 'Rektascenze RA (hodiny)')
                 self.plot_widget.setLabel('left', 'Deklinace Dec (stupně)')
         self.redraw()
@@ -569,11 +576,19 @@ class MainWindow(QMainWindow):
 
     def update_axis_ticks(self):
         is_local = self.view_mode_combo.currentIndex() == 1
-        hammer = self.projection_combo.currentIndex() == 1
+        projection = self.projection_combo.currentIndex()
+        hammer = projection == 1
+        lambert = projection == 2
         bottom = self.plot_widget.getAxis('bottom')
         left = self.plot_widget.getAxis('left')
         if is_local:
-            bottom.setLabel('Relativní azimut (střed = Slunce)' if not hammer else 'Relativní azimut (Hammer-Aitoff)')
+            if hammer:
+                bottom_label = 'Relativní azimut (Hammer-Aitoff)'
+            elif lambert:
+                bottom_label = 'Relativní azimut (válcová plochojevná)'
+            else:
+                bottom_label = 'Relativní azimut (střed = Slunce)'
+            bottom.setLabel(bottom_label)
             left.setLabel('Výška Alt (stupně)')
             x_range, y_range = self.plot_widget.getViewBox().viewRange()
             x_width = abs(x_range[1] - x_range[0])
@@ -583,7 +598,7 @@ class MainWindow(QMainWindow):
                 center_x = (x_range[0] + x_range[1]) / 2.0
                 center_y = (y_range[0] + y_range[1]) / 2.0
                 if center_x ** 2 / 8.0 + center_y ** 2 / 2.0 <= 1.0:
-                    center_longitude, center_altitude = self.inverse_local_hammer(
+                    center_longitude, center_altitude = self.inverse_local(
                         center_x, center_y
                     )
                     reference_altitude = float(np.clip(center_altitude, -80.0, 80.0))
@@ -612,7 +627,8 @@ class MainWindow(QMainWindow):
                     for position, value in zip(alt_pos, alt_values)
                 ]])
             else:
-                tick_step = 10 if x_width < 240.0 or y_height < 80.0 else 30
+                y_zoom_threshold = 50.0 if lambert else 80.0
+                tick_step = 10 if x_width < 240.0 or y_height < y_zoom_threshold else 30
                 az_values = np.arange(0, 360, tick_step)
                 az_positions = self.local_azimuth(az_values)
                 bottom.setTicks([[
@@ -620,8 +636,13 @@ class MainWindow(QMainWindow):
                     for position, value in zip(az_positions, az_values)
                 ]])
                 alt_values = np.arange(-90, 91, tick_step)
+                _, alt_positions = self.project_local(
+                    np.full_like(alt_values, 180, dtype=float),
+                    alt_values,
+                )
                 left.setTicks([[
-                    (float(value), f'{value}°') for value in alt_values
+                    (float(position), f'{value}°')
+                    for position, value in zip(alt_positions, alt_values)
                 ]])
             return
 
@@ -629,20 +650,12 @@ class MainWindow(QMainWindow):
         left.setLabel('Deklinace Dec (stupně)')
         ra_values = np.arange(0, 360, 15)
         ra_minor = np.arange(0, 360, 7.5)
-        if hammer:
-            ra_positions = self.project_global(ra_values, np.zeros_like(ra_values))[0]
-            ra_minor_positions = self.project_global(ra_minor, np.zeros_like(ra_minor))[0]
-            dec_values = np.arange(-80, 81, 20)
-            dec_minor = np.arange(-90, 91, 5)
-            dec_positions = self.project_global(np.full_like(dec_values, 180), dec_values)[1]
-            dec_minor_positions = self.project_global(np.full_like(dec_minor, 180), dec_minor)[1]
-        else:
-            ra_positions = ra_values
-            ra_minor_positions = ra_minor
-            dec_values = np.arange(-80, 81, 20)
-            dec_minor = np.arange(-90, 91, 5)
-            dec_positions = dec_values
-            dec_minor_positions = dec_minor
+        ra_positions = self.project_global(ra_values, np.zeros_like(ra_values))[0]
+        ra_minor_positions = self.project_global(ra_minor, np.zeros_like(ra_minor))[0]
+        dec_values = np.arange(-80, 81, 20)
+        dec_minor = np.arange(-90, 91, 5)
+        dec_positions = self.project_global(np.full_like(dec_values, 180), dec_values)[1]
+        dec_minor_positions = self.project_global(np.full_like(dec_minor, 180), dec_minor)[1]
         bottom.setTicks([
             [(float(position), '') for position in ra_minor_positions],
             [(float(position), f'{int(ra / 15)}h') for position, ra in zip(ra_positions, ra_values)],
@@ -663,15 +676,16 @@ class MainWindow(QMainWindow):
         location = OBSERVATORIES[self.obs_combo.currentText()]
         frame_altaz = AltAz(obstime=eval_time, location=location)
         if self.view_mode_combo.currentIndex() == 1:
-            if self.projection_combo.currentIndex() == 1:
+            projection = self.projection_combo.currentIndex()
+            if projection == 1:
                 if x ** 2 / 8.0 + y ** 2 / 2.0 > 1.0:
                     self.show_invalid_coordinates()
                     return
-                local_x, altitude = self.inverse_local_hammer(x, y)
+            local_x, altitude = self.inverse_local(x, y)
+            if projection == 1:
                 azimuth = (local_x + (self.local_sun_azimuth or 0)) % 360
             else:
-                azimuth = (x + (self.local_sun_azimuth or 0) - 180) % 360
-                altitude = y
+                azimuth = (local_x + (self.local_sun_azimuth or 0) - 180) % 360
             azimuth = float(np.asarray(azimuth))
             altitude = float(np.asarray(altitude))
             if (not np.isfinite(azimuth) or not np.isfinite(altitude) or
@@ -756,8 +770,11 @@ class MainWindow(QMainWindow):
     def project_global(self, ra, dec):
         ra = np.asarray(ra, dtype=float)
         dec = np.asarray(dec, dtype=float)
-        if self.projection_combo.currentIndex() == 0:
+        projection = self.projection_combo.currentIndex()
+        if projection == 0:
             return ra % 360.0, dec
+        if projection == 2:
+            return ra % 360.0, LAMBERT_Y_SCALE * np.sin(np.radians(dec))
 
         longitude = np.radians((ra - 180.0 + 180.0) % 360.0 - 180.0)
         latitude = np.radians(dec)
@@ -768,10 +785,19 @@ class MainWindow(QMainWindow):
         )
 
     def inverse_global(self, x, y):
-        if self.projection_combo.currentIndex() == 0:
+        projection = self.projection_combo.currentIndex()
+        if projection == 0:
             return np.asarray(x), np.asarray(y)
         x = np.asarray(x, dtype=float)
         y = np.asarray(y, dtype=float)
+        if projection == 2:
+            valid = np.abs(y) <= LAMBERT_Y_SCALE
+            dec = np.where(
+                valid,
+                np.degrees(np.arcsin(np.clip(y / LAMBERT_Y_SCALE, -1.0, 1.0))),
+                np.nan,
+            )
+            return x % 360.0, dec
         z = np.sqrt(np.maximum(0.0, 1.0 - (x ** 2 / 16.0) - (y ** 2 / 4.0)))
         longitude = 2.0 * np.arctan2(z * x, 2.0 * (2.0 * z ** 2 - 1.0))
         latitude = np.arcsin(np.clip(z * y, -1.0, 1.0))
@@ -780,8 +806,11 @@ class MainWindow(QMainWindow):
     def project_local(self, azimuth, altitude):
         azimuth = np.asarray(azimuth, dtype=float)
         altitude = np.asarray(altitude, dtype=float)
-        if self.projection_combo.currentIndex() == 0:
+        projection = self.projection_combo.currentIndex()
+        if projection == 0:
             return azimuth, altitude
+        if projection == 2:
+            return azimuth, LAMBERT_Y_SCALE * np.sin(np.radians(altitude))
         longitude = np.radians((azimuth - 180.0 + 180.0) % 360.0 - 180.0)
         latitude = np.radians(altitude)
         denominator = np.sqrt(1.0 + np.cos(latitude) * np.cos(longitude / 2.0))
@@ -790,7 +819,21 @@ class MainWindow(QMainWindow):
             np.sqrt(2.0) * np.sin(latitude) / denominator,
         )
 
-    def inverse_local_hammer(self, x, y):
+    def inverse_local(self, x, y):
+        projection = self.projection_combo.currentIndex()
+        if projection == 0:
+            return np.asarray(x), np.asarray(y)
+        if projection == 2:
+            x = np.asarray(x, dtype=float)
+            y = np.asarray(y, dtype=float)
+            valid = np.abs(y) <= LAMBERT_Y_SCALE
+            altitude = np.where(
+                valid,
+                np.degrees(np.arcsin(np.clip(y / LAMBERT_Y_SCALE, -1.0, 1.0))),
+                np.nan,
+            )
+            return x, altitude
+
         x = np.asarray(x, dtype=float)
         y = np.asarray(y, dtype=float)
         z = np.sqrt(np.maximum(0.0, 1.0 - (x ** 2 / 16.0) - (y ** 2 / 4.0)))
@@ -1139,7 +1182,16 @@ class MainWindow(QMainWindow):
                 if gal_y[i] >= 0 and gal_y[i + 1] >= 0:
                     line_x, line_y = self.project_local(
                         [gal_x[i], gal_x[i + 1]], [gal_y[i], gal_y[i + 1]])
-                    append_projected_segment(galactic_x, galactic_y, line_x[0], line_y[0], line_x[1], line_y[1])
+                    if self.projection_combo.currentIndex() == 1:
+                        append_projected_segment(
+                            galactic_x, galactic_y,
+                            line_x[0], line_y[0], line_x[1], line_y[1],
+                        )
+                    else:
+                        append_sky_segment(
+                            galactic_x, galactic_y,
+                            line_x[0], line_y[0], line_x[1], line_y[1],
+                        )
         else:
             galactic_x, galactic_y = self.project_global(galactic.ra.deg, galactic.dec.deg)
             if self.projection_combo.currentIndex() == 1:
@@ -1152,7 +1204,7 @@ class MainWindow(QMainWindow):
                 galactic_x, galactic_y = split_x, split_y
             else:
                 galactic_x, galactic_y = galactic_x.tolist(), galactic_y.tolist()
-            if self.projection_combo.currentIndex() == 0:
+            if self.projection_combo.currentIndex() != 1:
                 wrapped_x, wrapped_y = [], []
                 for i in range(len(galactic_x) - 1):
                     append_sky_segment(wrapped_x, wrapped_y, galactic_x[i], galactic_y[i], galactic_x[i + 1], galactic_y[i + 1])
@@ -1191,7 +1243,14 @@ class MainWindow(QMainWindow):
                 self.plot_widget.setXRange(-3, 3, padding=0)
                 self.plot_widget.setYRange(-1.5, 1.5, padding=0)
             else:
-                self.plot_widget.setYRange(lower_altitude, 90, padding=0)
+                _, projected_limits = self.project_local(
+                    [180.0, 180.0], [lower_altitude, 90.0]
+                )
+                self.plot_widget.setYRange(
+                    float(projected_limits[0]),
+                    float(projected_limits[1]),
+                    padding=0,
+                )
         else:
             self.local_sun_azimuth = None
             sun_altitude = float(sun.dec.deg)
@@ -1350,7 +1409,7 @@ class MainWindow(QMainWindow):
                     else:
                         x1, y1 = self.project_global([ra1], [dec1])
                         x2, y2 = self.project_global([ra2], [dec2])
-                        if self.projection_combo.currentIndex() == 0:
+                        if self.projection_combo.currentIndex() != 1:
                             append_sky_segment(c_x, c_y, x1[0], y1[0], x2[0], y2[0])
                         else:
                             append_projected_segment(c_x, c_y, x1[0], y1[0], x2[0], y2[0])

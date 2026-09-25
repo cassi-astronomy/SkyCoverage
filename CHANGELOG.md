@@ -19,6 +19,7 @@ V tomto souboru jsou zaznamenány významné změny projektu SkyCoverage.
 - Falešná vodorovná čára vznikající propojením konců kružnice sluneční elongace přes přechod RA 0°/360°.
 - Načtení dat MPC už nepřepisuje aktuální čas datem nejnovějšího archivního souboru.
 - Pohyb myši mimo platnou oblast lokální nebo globální projekce už neposílá Astropy souřadnice s výškou mimo rozsah −90° až +90°.
+- Inverzní Hammerův převod používá správné měřítko, takže Az/Alt a RA/Dec pod kurzorem souhlasí s vykreslenou mřížkou.
 
 ### Změněno
 
@@ -29,4 +30,5 @@ V tomto souboru jsou zaznamenány významné změny projektu SkyCoverage.
 - Při načtení se uchovává posledních 62 dní od nejnovějšího `.DAT` souboru a starší soubory se mažou.
 - Po vyčištění dat se odstraní také prázdné podadresáře observatoří; kořenová složka `skycov` vždy zůstane zachovaná.
 - `.DAT` soubory bez podporovaného data v názvu se odstraní, protože je program nedokáže zařadit ani zobrazit.
+- Lokální mřížka obsahuje jemné čáry po 10° a výraznější čáry po 30°; popisky os se při přiblížení automaticky přepnou z 30° na 10°.
 - Ovladač „Dny zpět“ je omezený na uchovávaných 62 dní a tlačítko se jmenuje „Načíst data“.

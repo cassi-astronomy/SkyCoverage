@@ -414,6 +414,12 @@ class MainWindow(QMainWindow):
         self.reload_timer = QTimer(self)
         self.reload_timer.setSingleShot(True)
         self.reload_timer.timeout.connect(self.start_processing)
+        self.axis_tick_timer = QTimer(self)
+        self.axis_tick_timer.setSingleShot(True)
+        self.axis_tick_timer.timeout.connect(self.update_axis_ticks)
+        self.plot_widget.getViewBox().sigRangeChanged.connect(
+            self.request_axis_tick_update
+        )
 
         self.days_spin.valueChanged.connect(self.request_data_reload)
         self.mag_spin.valueChanged.connect(self.request_redraw)
@@ -536,30 +542,53 @@ class MainWindow(QMainWindow):
         if is_local:
             bottom.setLabel('Relativní azimut (střed = Slunce)' if not hammer else 'Relativní azimut (Hammer-Aitoff)')
             left.setLabel('Výška Alt (stupně)')
+            x_range, y_range = self.plot_widget.getViewBox().viewRange()
+            x_width = abs(x_range[1] - x_range[0])
+            y_height = abs(y_range[1] - y_range[0])
             if hammer:
-                # Project azimuth ticks onto the equator (altitude=0)
-                az_values = np.arange(0, 360, 30)
+                tick_step = 10 if x_width < 4.5 or y_height < 2.25 else 30
+                center_x = (x_range[0] + x_range[1]) / 2.0
+                center_y = (y_range[0] + y_range[1]) / 2.0
+                if center_x ** 2 / 8.0 + center_y ** 2 / 2.0 <= 1.0:
+                    center_longitude, center_altitude = self.inverse_local_hammer(
+                        center_x, center_y
+                    )
+                    reference_altitude = float(np.clip(center_altitude, -80.0, 80.0))
+                    reference_azimuth = (float(center_longitude) + 180.0) % 360.0
+                else:
+                    reference_altitude = 0.0
+                    reference_azimuth = 180.0
+
+                az_values = np.arange(0, 360, tick_step)
                 az_pos, _ = self.project_local(
-                    self.local_azimuth(az_values), np.zeros_like(az_values))
+                    self.local_azimuth(az_values),
+                    np.full_like(az_values, reference_altitude, dtype=float),
+                )
                 bottom.setTicks([[
                     (float(position), f'{value}°')
                     for position, value in zip(az_pos, az_values)
                 ]])
 
-                # Project altitude ticks onto the central meridian.
-                alt_values = np.arange(-30, 91, 30)
+                alt_values = np.arange(-90, 91, tick_step)
                 _, alt_pos = self.project_local(
-                    np.full_like(alt_values, 180), alt_values)
+                    np.full_like(alt_values, reference_azimuth, dtype=float),
+                    alt_values,
+                )
                 left.setTicks([[
                     (float(position), f'{value}°')
                     for position, value in zip(alt_pos, alt_values)
                 ]])
             else:
+                tick_step = 10 if x_width < 240.0 or y_height < 80.0 else 30
+                az_values = np.arange(0, 360, tick_step)
+                az_positions = self.local_azimuth(az_values)
                 bottom.setTicks([[
-                    (value, f'{value}°') for value in range(0, 360, 30)
+                    (float(position), f'{value}°')
+                    for position, value in zip(az_positions, az_values)
                 ]])
+                alt_values = np.arange(-90, 91, tick_step)
                 left.setTicks([[
-                    (value, f'{value}°') for value in range(-30, 91, 30)
+                    (float(value), f'{value}°') for value in alt_values
                 ]])
             return
 
@@ -656,6 +685,9 @@ class MainWindow(QMainWindow):
     def request_redraw(self):
         self.redraw_timer.start(80)
 
+    def request_axis_tick_update(self, *_):
+        self.axis_tick_timer.start(50)
+
     def request_data_reload(self):
         self.reload_timer.start(250)
 
@@ -707,9 +739,9 @@ class MainWindow(QMainWindow):
             return np.asarray(x), np.asarray(y)
         x = np.asarray(x, dtype=float)
         y = np.asarray(y, dtype=float)
-        z = np.sqrt(np.maximum(0.0, 1.0 - (x ** 2 / 8.0) - (y ** 2 / 2.0)))
+        z = np.sqrt(np.maximum(0.0, 1.0 - (x ** 2 / 16.0) - (y ** 2 / 4.0)))
         longitude = 2.0 * np.arctan2(z * x, 2.0 * (2.0 * z ** 2 - 1.0))
-        latitude = np.arcsin(np.clip(z * y / np.sqrt(2.0), -1.0, 1.0))
+        latitude = np.arcsin(np.clip(z * y, -1.0, 1.0))
         return (np.degrees(longitude) + 180.0) % 360.0, np.degrees(latitude)
 
     def project_local(self, azimuth, altitude):
@@ -728,9 +760,9 @@ class MainWindow(QMainWindow):
     def inverse_local_hammer(self, x, y):
         x = np.asarray(x, dtype=float)
         y = np.asarray(y, dtype=float)
-        z = np.sqrt(np.maximum(0.0, 1.0 - (x ** 2 / 8.0) - (y ** 2 / 2.0)))
+        z = np.sqrt(np.maximum(0.0, 1.0 - (x ** 2 / 16.0) - (y ** 2 / 4.0)))
         longitude = 2.0 * np.arctan2(z * x, 2.0 * (2.0 * z ** 2 - 1.0))
-        latitude = np.arcsin(np.clip(z * y / np.sqrt(2.0), -1.0, 1.0))
+        latitude = np.arcsin(np.clip(z * y, -1.0, 1.0))
         return np.degrees(longitude), np.degrees(latitude)
 
     def kreutz_position(self, eval_time, days_before, population, variant):
@@ -833,75 +865,80 @@ class MainWindow(QMainWindow):
         self.plot_widget.addItem(item)
 
     def add_reference_grid(self, frame_altaz, is_local):
-        grid_x, grid_y = [], []
         hammer = self.projection_combo.currentIndex() == 1
         if is_local:
-            # Azimutální čáry (poledníky)
-            for azimuth in range(0, 360, 30):
+            major_x, major_y, minor_x, minor_y = [], [], [], []
+            for azimuth in range(0, 360, 10):
                 plot_azimuth = self.local_azimuth(azimuth)
-
-
-
-
-
-
-
-
-
-
                 if hammer:
-                    alts = np.linspace(0, 90, 46)
+                    alts = np.linspace(-30, 90, 61)
                     lx, ly = self.project_local(np.full_like(alts, plot_azimuth), alts)
-                    grid_x.extend(lx.tolist() + [np.nan])
-                    grid_y.extend(ly.tolist() + [np.nan])
                 else:
-                    line_x, line_y = self.project_local([plot_azimuth, plot_azimuth], [0, 90])
-                    grid_x.extend(line_x.tolist() + [np.nan])
-                    grid_y.extend(line_y.tolist() + [np.nan])
-            
-            # Výškové kružnice (rovnoběžky)
+                    lx, ly = self.project_local(
+                        [plot_azimuth, plot_azimuth], [-30, 90]
+                    )
+                target_x, target_y = (
+                    (major_x, major_y) if azimuth % 30 == 0
+                    else (minor_x, minor_y)
+                )
+                target_x.extend(lx.tolist() + [np.nan])
+                target_y.extend(ly.tolist() + [np.nan])
+
+            self.add_curve(
+                minor_x, minor_y,
+                pg.mkPen(color=(100, 120, 140, 35), width=0.4),
+            )
+            self.add_curve(
+                major_x, major_y,
+                pg.mkPen(color=(120, 145, 165, 80), width=0.7),
+            )
+
             az_samples = np.linspace(0, 360, 361)
-            for altitude, color, width, z in [
-                (0, (170, 105, 45, 230), 2.5, 12),
-                (10, (180, 120, 60, 170), 1.2, 11),
-                (20, (220, 150, 70, 170), 1.2, 11),
-                (30, (255, 190, 90, 170), 1.2, 11)
-            ]:
+            for altitude in range(-30, 90, 10):
+                if altitude == 0:
+                    color, width, z_value = (170, 105, 45, 230), 2.5, 12
+                elif altitude % 30 == 0:
+                    color, width, z_value = (220, 150, 70, 140), 1.0, 11
+                else:
+                    color, width, z_value = (180, 130, 85, 70), 0.55, 10
                 circle_az = self.local_azimuth(az_samples)
                 cx, cy = self.project_local(circle_az, np.full_like(circle_az, altitude))
-                
+
                 res_x, res_y = [], []
                 for i in range(len(cx) - 1):
                     if hammer:
                         append_projected_segment(res_x, res_y, cx[i], cy[i], cx[i+1], cy[i+1])
                     else:
                         append_sky_segment(res_x, res_y, cx[i], cy[i], cx[i+1], cy[i+1])
-                self.add_curve(res_x, res_y, pg.mkPen(color=color, width=width), z)
-        else:
-            major_x, major_y, minor_x, minor_y = [], [], [], []
-            for ra in np.arange(0, 360, 7.5):
-                samples = np.linspace(-90, 90, 91)
-                x, y = self.project_global(np.full_like(samples, ra), samples)
-                target_x, target_y = (major_x, major_y) if ra % 15 == 0 else (minor_x, minor_y)
-                target_x.extend(x.tolist() + [np.nan])
-                target_y.extend(y.tolist() + [np.nan])
-            for dec in range(-90, 91, 5):
-
-                samples = np.linspace(0, 360, 361)
-                x, y = self.project_global(samples, np.full_like(samples, dec))
-                target_x, target_y = (major_x, major_y) if dec % 20 == 0 else (minor_x, minor_y)
-
-
-                for i in range(len(x)-1):
-                    if hammer:
-                        append_projected_segment(target_x, target_y, x[i], y[i], x[i+1], y[i+1])
-                    else:
-                        append_sky_segment(target_x, target_y, x[i], y[i], x[i+1], y[i+1])
-            self.add_curve(minor_x, minor_y, pg.mkPen(color=(100, 120, 140, 45), width=0.45))
-            self.add_curve(major_x, major_y, pg.mkPen(color=(150, 170, 190, 100), width=0.9))
+                line_style = (
+                    Qt.PenStyle.DotLine if altitude < 0
+                    else Qt.PenStyle.SolidLine
+                )
+                self.add_curve(
+                    res_x, res_y,
+                    pg.mkPen(color=color, width=width, style=line_style),
+                    z_value,
+                )
             return
 
-        self.add_curve(grid_x, grid_y, pg.mkPen(color=(100, 120, 140, 70), width=0.6))
+        major_x, major_y, minor_x, minor_y = [], [], [], []
+        for ra in np.arange(0, 360, 7.5):
+            samples = np.linspace(-90, 90, 91)
+            x, y = self.project_global(np.full_like(samples, ra), samples)
+            target_x, target_y = (major_x, major_y) if ra % 15 == 0 else (minor_x, minor_y)
+            target_x.extend(x.tolist() + [np.nan])
+            target_y.extend(y.tolist() + [np.nan])
+        for dec in range(-90, 91, 5):
+            samples = np.linspace(0, 360, 361)
+            x, y = self.project_global(samples, np.full_like(samples, dec))
+            target_x, target_y = (major_x, major_y) if dec % 20 == 0 else (minor_x, minor_y)
+            for i in range(len(x)-1):
+                if hammer:
+                    append_projected_segment(target_x, target_y, x[i], y[i], x[i+1], y[i+1])
+                else:
+                    append_sky_segment(target_x, target_y, x[i], y[i], x[i+1], y[i+1])
+        self.add_curve(minor_x, minor_y, pg.mkPen(color=(100, 120, 140, 45), width=0.45))
+        self.add_curve(major_x, major_y, pg.mkPen(color=(150, 170, 190, 100), width=0.9))
 
     def add_reference_circles(self, frame_altaz, is_local):
         equator_pen = pg.mkPen(color=(80, 220, 255, 210), width=1.3)

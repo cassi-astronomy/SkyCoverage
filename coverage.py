@@ -407,11 +407,12 @@ class MainWindow(QMainWindow):
             return []
 
     def set_twilight(self, target_alt_deg, evening=True):
-        """Spočítá a nastaví přesný čas soumraku pro danou observatoř a datum."""
-        current_dt = self.time_edit.dateTime().toPyDateTime()
+        """Nastaví dnešní večerní nebo následující ranní soumrak v UTC."""
         obs_location = OBSERVATORIES[self.obs_combo.currentText()]
 
-        base_date = current_dt.replace(hour=0, minute=0, second=0, microsecond=0)
+        base_date = datetime.now(timezone.utc).replace(
+            hour=0, minute=0, second=0, microsecond=0
+        )
         if evening:
             search_date = base_date
             start_hour, end_hour = 12, 24
@@ -603,11 +604,6 @@ class MainWindow(QMainWindow):
         self.polygons, self.ref_time = result
         self.uncovered_cache.clear()
         self.btn_load.setEnabled(True)
-        if self.ref_time:
-            dt_utc = self.ref_time.datetime.replace(tzinfo=timezone.utc)
-            self.time_edit.blockSignals(True)
-            self.time_edit.setDateTime(QDateTime(dt_utc))
-            self.time_edit.blockSignals(False)
         self.redraw()
 
     def on_stars_loaded(self, result):

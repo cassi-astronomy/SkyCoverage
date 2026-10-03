@@ -9,8 +9,10 @@ import numpy as np
 
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
                              QHBoxLayout, QLabel, QSpinBox, QDoubleSpinBox, 
-                             QPushButton, QComboBox, QDateTimeEdit, QCheckBox)
+                             QPushButton, QComboBox, QDateTimeEdit, QCheckBox,
+                             QFrame)
 from PyQt6.QtCore import QThread, pyqtSignal, Qt, QDateTime, QTimer
+from PyQt6.QtGui import QFont
 import pyqtgraph as pg
 
 import astropy.units as u
@@ -29,6 +31,42 @@ OBSERVATORIES = {
 
 SKYCOV_RETENTION_DAYS = 62
 LAMBERT_Y_SCALE = 180.0 / np.pi
+STEREO_VIEW_RADIUS = 7.5
+
+BAYER_GREEK = {
+    "Alp": "α", "Bet": "β", "Gam": "γ", "Del": "δ", "Eps": "ε",
+    "Zet": "ζ", "Eta": "η", "The": "θ", "Iot": "ι", "Kap": "κ",
+    "Lam": "λ", "Mu": "μ", "Nu": "ν", "Xi": "ξ", "Omi": "ο",
+    "Pi": "π", "Rho": "ρ", "Sig": "σ", "Tau": "τ", "Ups": "υ",
+    "Phi": "φ", "Chi": "χ", "Psi": "ψ", "Ome": "ω",
+}
+SUPERSCRIPT_DIGITS = str.maketrans("0123456789", "⁰¹²³⁴⁵⁶⁷⁸⁹")
+
+
+def greek_bayer_label(value):
+    """Convert the abbreviated HYG Bayer field to a Greek label."""
+    if not value:
+        return ""
+    base, separator, suffix = value.partition("-")
+    greek = BAYER_GREEK.get(base, "")
+    if not greek:
+        return ""
+    return greek + (suffix.translate(SUPERSCRIPT_DIGITS) if separator else "")
+
+
+def star_color_from_index(color_index):
+    """Return a restrained display colour from the HYG B-V colour index."""
+    if not np.isfinite(color_index):
+        return (225, 232, 255, 235)
+    if color_index < -0.05:
+        return (170, 205, 255, 240)
+    if color_index < 0.35:
+        return (205, 222, 255, 240)
+    if color_index < 0.80:
+        return (255, 250, 225, 240)
+    if color_index < 1.30:
+        return (255, 220, 170, 240)
+    return (255, 180, 125, 240)
 
 
 def append_sky_segment(x_values, y_values, x1, y1, x2, y2):
@@ -257,7 +295,18 @@ class StarCatalogReader(QThread):
                     try:
                         magnitude = float(row['mag'])
                         if magnitude <= 5.0:
-                            stars.append((float(row['ra']) * 15.0, float(row['dec']), magnitude))
+                            try:
+                                color_index = float(row.get('ci', 'nan'))
+                            except (TypeError, ValueError):
+                                color_index = float('nan')
+                            stars.append((
+                                float(row['ra']) * 15.0,
+                                float(row['dec']),
+                                magnitude,
+                                greek_bayer_label(row.get('bayer', '')),
+                                row.get('con', ''),
+                                star_color_from_index(color_index),
+                            ))
                     except (KeyError, TypeError, ValueError):
                         continue
             self.finished.emit((stars, ""))
@@ -268,24 +317,48 @@ class StarCatalogReader(QThread):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("MPC Sky Coverage Visualizer & Planetarium")
-        self.resize(1400, 850)
-        self.setStyleSheet("background-color: #111111; color: white;")
+        self.setWindowTitle("SkyCoverage — MPC sky map")
+        self.resize(1600, 920)
+        self.setMinimumSize(1180, 720)
+        self.apply_modern_style()
 
         self.selected_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "skycov")
         self.const_lines = self.load_constellation_lines()
         self.const_boundaries = self.load_constellation_boundaries()
 
         central_widget = QWidget()
+        central_widget.setObjectName("centralWidget")
         self.setCentralWidget(central_widget)
         main_layout = QVBoxLayout(central_widget)
+        main_layout.setContentsMargins(14, 12, 14, 10)
+        main_layout.setSpacing(9)
+
+        header_frame = QFrame()
+        header_frame.setObjectName("headerCard")
+        header_layout = QHBoxLayout(header_frame)
+        header_layout.setContentsMargins(16, 9, 16, 9)
+        brand_layout = QVBoxLayout()
+        brand_layout.setSpacing(0)
+        title_label = QLabel("SKYCOVERAGE")
+        title_label.setObjectName("appTitle")
+        subtitle_label = QLabel("MPC coverage · planetárium · plánování pozorování")
+        subtitle_label.setObjectName("appSubtitle")
+        brand_layout.addWidget(title_label)
+        brand_layout.addWidget(subtitle_label)
+        header_layout.addLayout(brand_layout)
+        header_layout.addStretch()
+        main_layout.addWidget(header_frame)
 
         # Panel 1: Pohled, Observatoř, Čas, Mag
-        control_panel1 = QHBoxLayout()
+        primary_controls = QFrame()
+        primary_controls.setObjectName("controlCard")
+        control_panel1 = QHBoxLayout(primary_controls)
+        control_panel1.setContentsMargins(12, 9, 12, 9)
+        control_panel1.setSpacing(8)
 
         self.view_mode_combo = QComboBox()
         self.view_mode_combo.addItems(["Globální (RA/Dec)", "Lokální obzor (Alt/Az)"])
-        self.view_mode_combo.setStyleSheet("background-color: #222; color: #00ffcc; font-weight: bold; padding: 4px;")
+        self.view_mode_combo.setObjectName("accentControl")
         self.view_mode_combo.currentIndexChanged.connect(self.on_view_change)
         control_panel1.addWidget(self.view_mode_combo)
 
@@ -295,15 +368,17 @@ class MainWindow(QMainWindow):
             "Obdélníková",
             "Hammer-Aitoff",
             "Válcová plochojevná",
+            "Stereografická (věrné tvary)",
         ])
-        self.projection_combo.setStyleSheet("background-color: #222; color: white; padding: 4px;")
+        self.projection_combo.setToolTip(
+            "Stereografická projekce zachovává místní tvary a úhly souhvězdí"
+        )
         self.projection_combo.currentIndexChanged.connect(self.on_projection_change)
         control_panel1.addWidget(self.projection_combo)
 
         control_panel1.addWidget(QLabel("Observatoř:"))
         self.obs_combo = QComboBox()
         self.obs_combo.addItems(list(OBSERVATORIES.keys()))
-        self.obs_combo.setStyleSheet("background-color: #222; color: white; padding: 4px;")
         self.obs_combo.currentIndexChanged.connect(self.request_redraw)
         control_panel1.addWidget(self.obs_combo)
 
@@ -311,17 +386,13 @@ class MainWindow(QMainWindow):
         self.time_edit = QDateTimeEdit(QDateTime.currentDateTimeUtc())
         self.time_edit.setTimeSpec(Qt.TimeSpec.UTC)
         self.time_edit.setDisplayFormat("yyyy-MM-dd HH:mm")
-        self.time_edit.setStyleSheet("background-color: #222; color: white; padding: 4px;")
         self.time_edit.dateTimeChanged.connect(self.request_redraw)
         control_panel1.addWidget(self.time_edit)
-
-        spin_style = "QSpinBox, QDoubleSpinBox { background-color: #222; color: white; border: 1px solid #555; padding-right: 10px; min-height: 25px; }"
 
         control_panel1.addWidget(QLabel("Dny zpět:"))
         self.days_spin = QSpinBox()
         self.days_spin.setRange(1, SKYCOV_RETENTION_DAYS)
         self.days_spin.setValue(30)
-        self.days_spin.setStyleSheet(spin_style)
         control_panel1.addWidget(self.days_spin)
 
         control_panel1.addWidget(QLabel("Min. mag:"))
@@ -329,11 +400,10 @@ class MainWindow(QMainWindow):
         self.mag_spin.setRange(5.0, 25.0)
         self.mag_spin.setSingleStep(0.5)
         self.mag_spin.setValue(15.0)
-        self.mag_spin.setStyleSheet(spin_style)
         control_panel1.addWidget(self.mag_spin)
 
         self.btn_load = QPushButton("Načíst data")
-        self.btn_load.setStyleSheet("background-color: #008844; color: white; padding: 6px 12px; font-weight: bold;")
+        self.btn_load.setObjectName("primaryButton")
         self.btn_load.clicked.connect(self.start_processing)
         control_panel1.addWidget(self.btn_load)
 
@@ -342,7 +412,7 @@ class MainWindow(QMainWindow):
             "Model koridorů Kreutz I a II pro 5, 10, 15, 20, 30, 40 a 45 dní před přísluním; "
             "značky ukazují 5 dní a potom intervaly po 10 dnech"
         )
-        self.kreutz_check.setStyleSheet("color: #ff9966; font-weight: bold;")
+        self.kreutz_check.setObjectName("warmCheck")
         self.kreutz_check.stateChanged.connect(self.request_redraw)
         control_panel1.addWidget(self.kreutz_check)
 
@@ -357,44 +427,38 @@ class MainWindow(QMainWindow):
         self.coord_label.setAlignment(
             Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
         )
-        self.coord_label.setStyleSheet(
-            "color: #00ffcc; font-weight: bold; "
-            "font-family: monospace; font-size: 11px;"
-        )
+        self.coord_label.setObjectName("coordReadout")
         control_panel1.addStretch()
-        control_panel1.addWidget(self.coord_label)
+        header_layout.addWidget(self.coord_label)
 
-        main_layout.addLayout(control_panel1)
+        main_layout.addWidget(primary_controls)
 
         # Panel 2: Tlačítka soumraků
-        control_panel2 = QHBoxLayout()
-        control_panel2.addWidget(QLabel("Rychlé nastavení soumraku:"))
-
-        btn_style = "QPushButton { background-color: #2a2a3a; color: #ffcc00; border: 1px solid #444; padding: 4px 8px; font-size: 11px; } QPushButton:hover { background-color: #3a3a5a; }"
+        secondary_controls = QFrame()
+        secondary_controls.setObjectName("controlCard")
+        control_panel2 = QHBoxLayout(secondary_controls)
+        control_panel2.setContentsMargins(12, 8, 12, 8)
+        control_panel2.setSpacing(7)
+        control_panel2.addWidget(QLabel("Soumrak:"))
 
         self.btn_naut_eve = QPushButton("Večerní Nautický (-12°)")
-        self.btn_naut_eve.setStyleSheet(btn_style)
         self.btn_naut_eve.clicked.connect(lambda: self.set_twilight(-12.0, evening=True))
         control_panel2.addWidget(self.btn_naut_eve)
 
         self.btn_astro_eve = QPushButton("Večerní Astro Noc (-18°)")
-        self.btn_astro_eve.setStyleSheet(btn_style)
         self.btn_astro_eve.clicked.connect(lambda: self.set_twilight(-18.0, evening=True))
         control_panel2.addWidget(self.btn_astro_eve)
 
         self.btn_astro_morn = QPushButton("Ranní Astro Noc (-18°)")
-        self.btn_astro_morn.setStyleSheet(btn_style)
         self.btn_astro_morn.clicked.connect(lambda: self.set_twilight(-18.0, evening=False))
         control_panel2.addWidget(self.btn_astro_morn)
 
         self.btn_naut_morn = QPushButton("Ranní Nautický (-12°)")
-        self.btn_naut_morn.setStyleSheet(btn_style)
         self.btn_naut_morn.clicked.connect(lambda: self.set_twilight(-12.0, evening=False))
         control_panel2.addWidget(self.btn_naut_morn)
 
         for label, minutes in [("+30 min", 30), ("+1 h", 60), ("-1 h", -60), ("-30 min", -30)]:
             button = QPushButton(label)
-            button.setStyleSheet(btn_style)
             button.clicked.connect(lambda checked=False, delta=minutes: self.shift_time(delta))
             control_panel2.addWidget(button)
 
@@ -403,21 +467,39 @@ class MainWindow(QMainWindow):
         self.const_boundaries_check.setToolTip(
             "Zobrazit nebo skrýt oficiální hranice 88 souhvězdí"
         )
-        self.const_boundaries_check.setStyleSheet("color: #80b89e; font-weight: bold;")
+        self.const_boundaries_check.setObjectName("coolCheck")
         self.const_boundaries_check.stateChanged.connect(self.request_redraw)
         control_panel2.addWidget(self.const_boundaries_check)
 
+        self.bayer_labels_check = QCheckBox("Bayer αβγ")
+        self.bayer_labels_check.setChecked(True)
+        self.bayer_labels_check.setToolTip(
+            "Zobrazit řecká Bayerova označení jasných hvězd; hustota se přizpůsobuje přiblížení"
+        )
+        self.bayer_labels_check.setObjectName("coolCheck")
+        self.bayer_labels_check.stateChanged.connect(self.request_redraw)
+        control_panel2.addWidget(self.bayer_labels_check)
+
         control_panel2.addStretch()
-        main_layout.addLayout(control_panel2)
+        main_layout.addWidget(secondary_controls)
 
         # Plot
         self.plot_widget = pg.PlotWidget()
-        self.plot_widget.setBackground('#050508')
+        self.plot_widget.setObjectName("skyPlot")
+        self.plot_widget.setBackground('#060a18')
         self.plot_widget.getViewBox().invertX(True)
+        self.plot_widget.getViewBox().setAspectLocked(True, ratio=1.0)
+        axis_font = QFont("Segoe UI", 9)
+        for axis_name in ("left", "bottom"):
+            axis = self.plot_widget.getAxis(axis_name)
+            axis.setPen(pg.mkPen((70, 89, 118, 180), width=1))
+            axis.setTextPen(pg.mkPen((142, 158, 184, 220)))
+            axis.setTickFont(axis_font)
         self.plot_widget.scene().sigMouseMoved.connect(self.on_mouse_move)
         main_layout.addWidget(self.plot_widget)
 
         self.status_label = QLabel("Připraveno.")
+        self.status_label.setObjectName("statusLabel")
         main_layout.addWidget(self.status_label)
 
         self.polygons = []
@@ -425,6 +507,8 @@ class MainWindow(QMainWindow):
         self.ref_time = None
         self.local_sun_azimuth = None
         self.uncovered_cache = {}
+        self.bayer_label_data = []
+        self.bayer_label_items = []
         self.redraw_timer = QTimer(self)
         self.redraw_timer.setSingleShot(True)
         self.redraw_timer.timeout.connect(self.redraw)
@@ -434,8 +518,14 @@ class MainWindow(QMainWindow):
         self.axis_tick_timer = QTimer(self)
         self.axis_tick_timer.setSingleShot(True)
         self.axis_tick_timer.timeout.connect(self.update_axis_ticks)
+        self.bayer_label_timer = QTimer(self)
+        self.bayer_label_timer.setSingleShot(True)
+        self.bayer_label_timer.timeout.connect(self.refresh_bayer_labels)
         self.plot_widget.getViewBox().sigRangeChanged.connect(
             self.request_axis_tick_update
+        )
+        self.plot_widget.getViewBox().sigRangeChanged.connect(
+            self.request_bayer_label_update
         )
 
         self.days_spin.valueChanged.connect(self.request_data_reload)
@@ -449,6 +539,143 @@ class MainWindow(QMainWindow):
         self.star_reader.start()
         self.update_axis_ticks()
         self.start_processing()
+
+    def apply_modern_style(self):
+        self.setStyleSheet("""
+            QMainWindow, QWidget#centralWidget {
+                background-color: #070b16;
+                color: #dbe7f7;
+                font-family: "Segoe UI";
+                font-size: 12px;
+            }
+            QFrame#headerCard {
+                background-color: #0d1525;
+                border: 1px solid #1d2a42;
+                border-radius: 12px;
+            }
+            QFrame#controlCard {
+                background-color: #0d1422;
+                border: 1px solid #1b2940;
+                border-radius: 10px;
+            }
+            QLabel {
+                color: #9cabc1;
+                background: transparent;
+                border: none;
+            }
+            QLabel#appTitle {
+                color: #f2f7ff;
+                font-size: 18px;
+                font-weight: 700;
+                letter-spacing: 2px;
+            }
+            QLabel#appSubtitle {
+                color: #6f829e;
+                font-size: 11px;
+            }
+            QLabel#coordReadout {
+                color: #72e6d1;
+                background-color: #09111e;
+                border: 1px solid #1d3c48;
+                border-radius: 8px;
+                padding: 5px 10px;
+                font-family: "Cascadia Mono", "Consolas";
+                font-size: 11px;
+                font-weight: 600;
+            }
+            QLabel#statusLabel {
+                color: #71829a;
+                padding: 1px 6px;
+                font-size: 11px;
+            }
+            QComboBox, QSpinBox, QDoubleSpinBox, QDateTimeEdit {
+                color: #e8f0fb;
+                background-color: #152137;
+                border: 1px solid #2a3a56;
+                border-radius: 7px;
+                padding: 6px 9px;
+                min-height: 20px;
+                selection-background-color: #245e72;
+            }
+            QComboBox:hover, QSpinBox:hover, QDoubleSpinBox:hover, QDateTimeEdit:hover {
+                border-color: #3e6380;
+                background-color: #182740;
+            }
+            QComboBox:focus, QSpinBox:focus, QDoubleSpinBox:focus, QDateTimeEdit:focus {
+                border-color: #42cbb8;
+            }
+            QComboBox#accentControl {
+                color: #75ead5;
+                font-weight: 600;
+            }
+            QComboBox QAbstractItemView {
+                color: #e8f0fb;
+                background-color: #111c30;
+                border: 1px solid #2a3a56;
+                selection-background-color: #22445d;
+                outline: none;
+            }
+            QPushButton {
+                color: #cbd8e9;
+                background-color: #17243a;
+                border: 1px solid #2a3b57;
+                border-radius: 7px;
+                padding: 6px 10px;
+                min-height: 20px;
+            }
+            QPushButton:hover {
+                color: #ffffff;
+                background-color: #20314d;
+                border-color: #46617f;
+            }
+            QPushButton:pressed {
+                background-color: #101a2c;
+            }
+            QPushButton#primaryButton {
+                color: #061512;
+                background-color: #52d5b9;
+                border-color: #69e4ca;
+                font-weight: 700;
+                padding-left: 14px;
+                padding-right: 14px;
+            }
+            QPushButton#primaryButton:hover {
+                background-color: #6ae5ca;
+            }
+            QPushButton:disabled {
+                color: #59677b;
+                background-color: #111a2a;
+                border-color: #1e2a3d;
+            }
+            QCheckBox {
+                color: #b9c7d9;
+                spacing: 6px;
+                background: transparent;
+            }
+            QCheckBox#coolCheck { color: #8fd2bd; font-weight: 600; }
+            QCheckBox#warmCheck { color: #ffad82; font-weight: 600; }
+            QCheckBox::indicator {
+                width: 15px;
+                height: 15px;
+                border: 1px solid #42536e;
+                border-radius: 4px;
+                background-color: #111b2d;
+            }
+            QCheckBox::indicator:checked {
+                background-color: #49cbb3;
+                border-color: #70e2cf;
+            }
+            QToolTip {
+                color: #edf5ff;
+                background-color: #111c2e;
+                border: 1px solid #35506c;
+                padding: 5px;
+            }
+            QGraphicsView#skyPlot {
+                border: 1px solid #1e2c45;
+                border-radius: 10px;
+            }
+        """)
 
     def load_cached_geojson(self, filename, url):
         cache_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "astro_cache")
@@ -558,6 +785,7 @@ class MainWindow(QMainWindow):
         is_local = self.view_mode_combo.currentIndex() == 1
         projection = self.projection_combo.currentIndex()
         self.plot_widget.clear()
+        self.plot_widget.getViewBox().setAspectLocked(True, ratio=1.0)
         if is_local:
             self.plot_widget.getViewBox().invertX(False)
             if projection == 1:
@@ -565,6 +793,11 @@ class MainWindow(QMainWindow):
                 self.plot_widget.setYRange(-1.5, 1.5)
                 self.plot_widget.setLabel('bottom', 'Relativní azimut (střed = Slunce)')
                 self.plot_widget.setLabel('left', 'Výška Alt (stupně)')
+            elif projection == 3:
+                self.plot_widget.setXRange(-3.7, 3.7)
+                self.plot_widget.setYRange(-3.7, 3.7)
+                self.plot_widget.setLabel('bottom', 'Stereografická obloha · zenit uprostřed')
+                self.plot_widget.setLabel('left', '')
             else:
                 self.plot_widget.setXRange(0, 360)
                 upper_y = LAMBERT_Y_SCALE if projection == 2 else 90.0
@@ -578,6 +811,11 @@ class MainWindow(QMainWindow):
                 self.plot_widget.setYRange(-1.5, 1.5)
                 self.plot_widget.setLabel('bottom', 'Rektascenze RA (hodiny)')
                 self.plot_widget.setLabel('left', 'Deklinace Dec (stupně)')
+            elif projection == 3:
+                self.plot_widget.setXRange(-STEREO_VIEW_RADIUS, STEREO_VIEW_RADIUS)
+                self.plot_widget.setYRange(-STEREO_VIEW_RADIUS, STEREO_VIEW_RADIUS)
+                self.plot_widget.setLabel('bottom', 'Stereografická · střed RA 12h, Dec 0°')
+                self.plot_widget.setLabel('left', '')
             else:
                 self.plot_widget.setXRange(0, 360)
                 upper_y = LAMBERT_Y_SCALE if projection == 2 else 90.0
@@ -595,8 +833,18 @@ class MainWindow(QMainWindow):
         projection = self.projection_combo.currentIndex()
         hammer = projection == 1
         lambert = projection == 2
+        stereo = projection == 3
         bottom = self.plot_widget.getAxis('bottom')
         left = self.plot_widget.getAxis('left')
+        if stereo:
+            if is_local:
+                bottom.setLabel('Stereografická obloha · zenit uprostřed')
+            else:
+                bottom.setLabel('Stereografická · střed RA 12h, Dec 0°')
+            left.setLabel('')
+            bottom.setTicks([[]])
+            left.setTicks([[]])
+            return
         if is_local:
             if hammer:
                 bottom_label = 'Relativní azimut (Hammer-Aitoff)'
@@ -751,6 +999,9 @@ class MainWindow(QMainWindow):
     def request_axis_tick_update(self, *_):
         self.axis_tick_timer.start(50)
 
+    def request_bayer_label_update(self, *_):
+        self.bayer_label_timer.start(120)
+
     def request_data_reload(self):
         self.reload_timer.start(250)
 
@@ -794,6 +1045,19 @@ class MainWindow(QMainWindow):
 
         longitude = np.radians((ra - 180.0 + 180.0) % 360.0 - 180.0)
         latitude = np.radians(dec)
+        if projection == 3:
+            denominator = 1.0 + np.cos(latitude) * np.cos(longitude)
+            safe = denominator > 1e-6
+            safe_denominator = np.where(safe, denominator, 1.0)
+            x = np.where(
+                safe,
+                2.0 * np.cos(latitude) * np.sin(longitude) / safe_denominator,
+                np.nan,
+            )
+            y = np.where(safe, 2.0 * np.sin(latitude) / safe_denominator, np.nan)
+            visible = np.hypot(x, y) <= STEREO_VIEW_RADIUS * 1.02
+            return np.where(visible, x, np.nan), np.where(visible, y, np.nan)
+
         denominator = np.sqrt(1.0 + np.cos(latitude) * np.cos(longitude / 2.0))
         return (
             2.0 * np.sqrt(2.0) * np.cos(latitude) * np.sin(longitude / 2.0) / denominator,
@@ -814,6 +1078,24 @@ class MainWindow(QMainWindow):
                 np.nan,
             )
             return x % 360.0, dec
+        if projection == 3:
+            radius = np.hypot(x, y)
+            angular_distance = 2.0 * np.arctan2(radius, 2.0)
+            radius_safe = np.where(radius > 1e-12, radius, 1.0)
+            dec = np.arcsin(np.clip(
+                y * np.sin(angular_distance) / radius_safe, -1.0, 1.0
+            ))
+            longitude = np.arctan2(
+                x * np.sin(angular_distance),
+                radius_safe * np.cos(angular_distance),
+            )
+            dec = np.where(radius > 1e-12, dec, 0.0)
+            longitude = np.where(radius > 1e-12, longitude, 0.0)
+            valid = radius <= STEREO_VIEW_RADIUS * 1.02
+            return (
+                np.where(valid, (np.degrees(longitude) + 180.0) % 360.0, np.nan),
+                np.where(valid, np.degrees(dec), np.nan),
+            )
         z = np.sqrt(np.maximum(0.0, 1.0 - (x ** 2 / 16.0) - (y ** 2 / 4.0)))
         longitude = 2.0 * np.arctan2(z * x, 2.0 * (2.0 * z ** 2 - 1.0))
         latitude = np.arcsin(np.clip(z * y, -1.0, 1.0))
@@ -827,6 +1109,10 @@ class MainWindow(QMainWindow):
             return azimuth, altitude
         if projection == 2:
             return azimuth, LAMBERT_Y_SCALE * np.sin(np.radians(altitude))
+        if projection == 3:
+            angle = np.radians((azimuth - 180.0 + 180.0) % 360.0 - 180.0)
+            radius = 2.0 * np.tan(np.radians((90.0 - altitude) / 2.0))
+            return radius * np.sin(angle), -radius * np.cos(angle)
         longitude = np.radians((azimuth - 180.0 + 180.0) % 360.0 - 180.0)
         latitude = np.radians(altitude)
         denominator = np.sqrt(1.0 + np.cos(latitude) * np.cos(longitude / 2.0))
@@ -852,6 +1138,14 @@ class MainWindow(QMainWindow):
 
         x = np.asarray(x, dtype=float)
         y = np.asarray(y, dtype=float)
+        if projection == 3:
+            radius = np.hypot(x, y)
+            altitude = 90.0 - np.degrees(2.0 * np.arctan2(radius, 2.0))
+            angle = np.degrees(np.arctan2(x, -y))
+            azimuth = (angle + 180.0) % 360.0
+            azimuth = np.where(radius > 1e-12, azimuth, 180.0)
+            return azimuth, altitude
+
         z = np.sqrt(np.maximum(0.0, 1.0 - (x ** 2 / 16.0) - (y ** 2 / 4.0)))
         longitude = 2.0 * np.arctan2(z * x, 2.0 * (2.0 * z ** 2 - 1.0))
         latitude = np.arcsin(np.clip(z * y, -1.0, 1.0))
@@ -937,12 +1231,12 @@ class MainWindow(QMainWindow):
                     if np.isclose(variant, 0.0) and days_before in marker_days:
                         central_markers.append((days_before, points_x[-1], points_y[-1]))
                 for index in range(len(points_x) - 1):
-                    if is_local and self.projection_combo.currentIndex() == 1:
+                    if is_local and self.projection_combo.currentIndex() in (1, 3):
                         append_projected_segment(corridor_x, corridor_y, points_x[index], points_y[index], points_x[index + 1], points_y[index + 1], 0.5)
                     elif is_local:
                         append_sky_segment(corridor_x, corridor_y, points_x[index], points_y[index], points_x[index + 1], points_y[index + 1])
                     else:
-                        append_projected_segment(corridor_x, corridor_y, points_x[index], points_y[index], points_x[index + 1], points_y[index + 1], 0.5) if self.projection_combo.currentIndex() == 1 else append_sky_segment(corridor_x, corridor_y, points_x[index], points_y[index], points_x[index + 1], points_y[index + 1])
+                        append_projected_segment(corridor_x, corridor_y, points_x[index], points_y[index], points_x[index + 1], points_y[index + 1], 0.5) if self.projection_combo.currentIndex() in (1, 3) else append_sky_segment(corridor_x, corridor_y, points_x[index], points_y[index], points_x[index + 1], points_y[index + 1])
             self.add_curve(corridor_x, corridor_y, pg.mkPen(color=color, width=1.5, style=line_style), 6)
 
             marker_item = pg.ScatterPlotItem(
@@ -990,7 +1284,7 @@ class MainWindow(QMainWindow):
 
         boundary_x, boundary_y = [], []
         offset = 0
-        hammer = self.projection_combo.currentIndex() == 1
+        projected = self.projection_combo.currentIndex() in (1, 3)
         for coordinates in boundary_arrays:
             point_count = len(coordinates)
             if is_local:
@@ -1009,7 +1303,7 @@ class MainWindow(QMainWindow):
             for index in range(point_count - 1):
                 if is_local and altitude[index] < 0.0 and altitude[index + 1] < 0.0:
                     continue
-                if hammer:
+                if projected:
                     append_projected_segment(
                         boundary_x, boundary_y,
                         x_values[index], y_values[index],
@@ -1026,8 +1320,8 @@ class MainWindow(QMainWindow):
             boundary_x,
             boundary_y,
             pg.mkPen(
-                color=(115, 160, 135, 125),
-                width=0.8,
+                color=(188, 137, 72, 105),
+                width=0.75,
                 style=Qt.PenStyle.DashLine,
             ),
             3,
@@ -1040,13 +1334,77 @@ class MainWindow(QMainWindow):
         item.setZValue(z_value)
         self.plot_widget.addItem(item)
 
+    def refresh_bayer_labels(self):
+        for item in self.bayer_label_items:
+            try:
+                self.plot_widget.removeItem(item)
+            except RuntimeError:
+                pass
+        self.bayer_label_items = []
+
+        if not self.bayer_labels_check.isChecked() or not self.bayer_label_data:
+            return
+
+        star_x, star_y, star_mag, star_bayer = self.bayer_label_data
+        x_range, y_range = self.plot_widget.getViewBox().viewRange()
+        x_min, x_max = sorted(x_range)
+        y_min, y_max = sorted(y_range)
+        x_span = x_max - x_min
+        y_span = y_max - y_min
+        projection = self.projection_combo.currentIndex()
+        is_local = self.view_mode_combo.currentIndex() == 1
+        if projection in (0, 2):
+            full_width = 360.0
+        elif projection == 1:
+            full_width = 6.0
+        else:
+            full_width = 7.4 if is_local else 2.0 * STEREO_VIEW_RADIUS
+        zoom_ratio = x_span / full_width
+        if zoom_ratio > 0.80:
+            magnitude_limit = 3.0
+        elif zoom_ratio > 0.50:
+            magnitude_limit = 3.5
+        else:
+            magnitude_limit = 4.0
+
+        in_view = (
+            (star_x >= x_min) & (star_x <= x_max) &
+            (star_y >= y_min) & (star_y <= y_max)
+        )
+        candidates = np.where(
+            in_view & (star_mag <= magnitude_limit) & (star_bayer != "")
+        )[0]
+        min_dx = x_span * 27.0 / max(self.plot_widget.width(), 1)
+        min_dy = y_span * 17.0 / max(self.plot_widget.height(), 1)
+        accepted = []
+        label_font = QFont("Segoe UI Symbol", 9, QFont.Weight.DemiBold)
+        for index in candidates[np.argsort(star_mag[candidates])]:
+            x_value = float(star_x[index])
+            y_value = float(star_y[index])
+            if any(
+                abs(x_value - other_x) < min_dx and abs(y_value - other_y) < min_dy
+                for other_x, other_y in accepted
+            ):
+                continue
+            accepted.append((x_value, y_value))
+            label = pg.TextItem(
+                text=str(star_bayer[index]),
+                color=(218, 230, 255, 225),
+                anchor=(-0.28, 0.62),
+            )
+            label.setFont(label_font)
+            label.setZValue(22)
+            label.setPos(x_value, y_value)
+            self.plot_widget.addItem(label)
+            self.bayer_label_items.append(label)
+
     def add_reference_grid(self, frame_altaz, is_local):
-        hammer = self.projection_combo.currentIndex() == 1
+        projected = self.projection_combo.currentIndex() in (1, 3)
         if is_local:
             major_x, major_y, minor_x, minor_y = [], [], [], []
             for azimuth in range(0, 360, 10):
                 plot_azimuth = self.local_azimuth(azimuth)
-                if hammer:
+                if projected:
                     alts = np.linspace(-30, 90, 61)
                     lx, ly = self.project_local(np.full_like(alts, plot_azimuth), alts)
                 else:
@@ -1084,7 +1442,7 @@ class MainWindow(QMainWindow):
 
                 res_x, res_y = [], []
                 for i in range(len(cx) - 1):
-                    if hammer:
+                    if projected:
                         append_projected_segment(res_x, res_y, cx[i], cy[i], cx[i+1], cy[i+1])
                     else:
                         append_sky_segment(res_x, res_y, cx[i], cy[i], cx[i+1], cy[i+1])
@@ -1111,7 +1469,7 @@ class MainWindow(QMainWindow):
             x, y = self.project_global(samples, np.full_like(samples, dec))
             target_x, target_y = (major_x, major_y) if dec % 20 == 0 else (minor_x, minor_y)
             for i in range(len(x)-1):
-                if hammer:
+                if projected:
                     append_projected_segment(target_x, target_y, x[i], y[i], x[i+1], y[i+1])
                 else:
                     append_sky_segment(target_x, target_y, x[i], y[i], x[i+1], y[i+1])
@@ -1135,7 +1493,7 @@ class MainWindow(QMainWindow):
             for i in range(len(az) - 1):
                 if alt[i] >= 0 and alt[i + 1] >= 0:
                     line_x, line_y = self.project_local([az[i], az[i + 1]], [alt[i], alt[i + 1]])
-                    if self.projection_combo.currentIndex() == 1:
+                    if self.projection_combo.currentIndex() in (1, 3):
                         append_projected_segment(equator_x, equator_y, line_x[0], line_y[0], line_x[1], line_y[1])
                     else:
                         append_sky_segment(equator_x, equator_y, line_x[0], line_y[0], line_x[1], line_y[1])
@@ -1166,7 +1524,7 @@ class MainWindow(QMainWindow):
             ecliptic_x, ecliptic_y = [], []
             for i in range(len(az) - 1):
                 line_x, line_y = self.project_local([az[i], az[i + 1]], [alt[i], alt[i + 1]])
-                if self.projection_combo.currentIndex() == 1:
+                if self.projection_combo.currentIndex() in (1, 3):
                     append_projected_segment(ecliptic_x, ecliptic_y, line_x[0], line_y[0], line_x[1], line_y[1])
                 else:
                     append_sky_segment(ecliptic_x, ecliptic_y, line_x[0], line_y[0], line_x[1], line_y[1])
@@ -1174,7 +1532,7 @@ class MainWindow(QMainWindow):
             projected_x, projected_y = self.project_global(ecliptic_ra, ecliptic_dec)
             ecliptic_x, ecliptic_y = [], []
             for index in range(len(projected_x) - 1):
-                if self.projection_combo.currentIndex() == 1:
+                if self.projection_combo.currentIndex() in (1, 3):
                     append_projected_segment(
                         ecliptic_x, ecliptic_y,
                         projected_x[index], projected_y[index],
@@ -1198,7 +1556,7 @@ class MainWindow(QMainWindow):
                 if gal_y[i] >= 0 and gal_y[i + 1] >= 0:
                     line_x, line_y = self.project_local(
                         [gal_x[i], gal_x[i + 1]], [gal_y[i], gal_y[i + 1]])
-                    if self.projection_combo.currentIndex() == 1:
+                    if self.projection_combo.currentIndex() in (1, 3):
                         append_projected_segment(
                             galactic_x, galactic_y,
                             line_x[0], line_y[0], line_x[1], line_y[1],
@@ -1210,7 +1568,7 @@ class MainWindow(QMainWindow):
                         )
         else:
             galactic_x, galactic_y = self.project_global(galactic.ra.deg, galactic.dec.deg)
-            if self.projection_combo.currentIndex() == 1:
+            if self.projection_combo.currentIndex() in (1, 3):
                 split_x, split_y = [], []
                 for i in range(len(galactic_x) - 1):
                     if (abs(galactic_x[i + 1] - galactic_x[i]) < 0.3 and
@@ -1220,7 +1578,7 @@ class MainWindow(QMainWindow):
                 galactic_x, galactic_y = split_x, split_y
             else:
                 galactic_x, galactic_y = galactic_x.tolist(), galactic_y.tolist()
-            if self.projection_combo.currentIndex() != 1:
+            if self.projection_combo.currentIndex() not in (1, 3):
                 wrapped_x, wrapped_y = [], []
                 for i in range(len(galactic_x) - 1):
                     append_sky_segment(wrapped_x, wrapped_y, galactic_x[i], galactic_y[i], galactic_x[i + 1], galactic_y[i + 1])
@@ -1232,6 +1590,8 @@ class MainWindow(QMainWindow):
 
     def redraw(self):
         self.plot_widget.clear()
+        self.bayer_label_items = []
+        self.bayer_label_data = []
         
         qdt = self.time_edit.dateTime().toPyDateTime()
         eval_time = Time(qdt)
@@ -1258,6 +1618,11 @@ class MainWindow(QMainWindow):
             if self.projection_combo.currentIndex() == 1:
                 self.plot_widget.setXRange(-3, 3, padding=0)
                 self.plot_widget.setYRange(-1.5, 1.5, padding=0)
+            elif self.projection_combo.currentIndex() == 3:
+                radius = 2.0 * np.tan(np.radians((90.0 - lower_altitude) / 2.0))
+                radius *= 1.04
+                self.plot_widget.setXRange(-radius, radius, padding=0)
+                self.plot_widget.setYRange(-radius, radius, padding=0)
             else:
                 _, projected_limits = self.project_local(
                     [180.0, 180.0], [lower_altitude, 90.0]
@@ -1282,6 +1647,13 @@ class MainWindow(QMainWindow):
             star_ra = np.array([star[0] for star in self.stars])
             star_dec = np.array([star[1] for star in self.stars])
             star_mag = np.array([star[2] for star in self.stars])
+            star_bayer = np.array([
+                star[3] if len(star) > 3 else "" for star in self.stars
+            ], dtype=object)
+            star_colors = np.array([
+                star[5] if len(star) > 5 else (225, 232, 255, 235)
+                for star in self.stars
+            ], dtype=object)
             if is_local:
                 star_az, star_alt = self.transform_coords(star_ra, star_dec, frame_altaz)
                 visible = star_alt >= local_lower_altitude
@@ -1289,9 +1661,46 @@ class MainWindow(QMainWindow):
             else:
                 visible = np.ones(len(star_ra), dtype=bool)
                 star_x, star_y = self.project_global(star_ra, star_dec)
-            star_size = np.clip(7.0 - star_mag[visible], 1.5, 6.0)
-            self.plot_widget.addItem(pg.ScatterPlotItem(
-                x=star_x, y=star_y, size=star_size, brush=(220, 230, 255, 190), pen=None))
+            visible_mag = star_mag[visible]
+            visible_bayer = star_bayer[visible]
+            visible_colors = star_colors[visible]
+            finite = np.isfinite(star_x) & np.isfinite(star_y)
+            star_x = np.asarray(star_x)[finite]
+            star_y = np.asarray(star_y)[finite]
+            visible_mag = visible_mag[finite]
+            visible_bayer = visible_bayer[finite]
+            visible_colors = visible_colors[finite]
+
+            star_size = np.clip(9.2 - 1.55 * visible_mag, 1.6, 9.5)
+            bright = visible_mag <= 2.5
+            if np.any(bright):
+                halo_item = pg.ScatterPlotItem(
+                    x=star_x[bright],
+                    y=star_y[bright],
+                    size=star_size[bright] * 2.7,
+                    brush=(135, 175, 255, 35),
+                    pen=None,
+                )
+                halo_item.setZValue(17)
+                self.plot_widget.addItem(halo_item)
+
+            star_item = pg.ScatterPlotItem(
+                x=star_x,
+                y=star_y,
+                size=star_size,
+                brush=[pg.mkBrush(tuple(color)) for color in visible_colors],
+                pen=pg.mkPen((245, 250, 255, 120), width=0.35),
+            )
+            star_item.setZValue(18)
+            self.plot_widget.addItem(star_item)
+
+            self.bayer_label_data = (
+                star_x.copy(),
+                star_y.copy(),
+                visible_mag.copy(),
+                visible_bayer.copy(),
+            )
+            self.refresh_bayer_labels()
 
         if not is_local or sun_altitude >= -30:
             self.plot_widget.addItem(pg.ScatterPlotItem(x=sun_x, y=sun_y, size=18, brush='#ffcc00', pen=pg.mkPen('w', width=1.5)))
@@ -1327,7 +1736,7 @@ class MainWindow(QMainWindow):
                 for i in range(len(x_c) - 1):
                     line_x, line_y = self.project_local(
                         [x_c[i], x_c[i + 1]], [y_c[i], y_c[i + 1]])
-                    if self.projection_combo.currentIndex() == 1:
+                    if self.projection_combo.currentIndex() in (1, 3):
                         append_projected_segment(
                             projected_x, projected_y,
                             line_x[0], line_y[0], line_x[1], line_y[1])
@@ -1340,7 +1749,7 @@ class MainWindow(QMainWindow):
                 raw_x, raw_y = self.project_global(ra_deg_c, dec_deg_c)
                 projected_x, projected_y = [], []
                 for index in range(len(raw_x) - 1):
-                    if self.projection_combo.currentIndex() == 1:
+                    if self.projection_combo.currentIndex() in (1, 3):
                         append_projected_segment(
                             projected_x, projected_y,
                             raw_x[index], raw_y[index],
@@ -1389,7 +1798,7 @@ class MainWindow(QMainWindow):
                     px, py = self.project_global(ra_arr, dec_arr)
 
                 for i in range(len(px) - 1):
-                    if self.projection_combo.currentIndex() == 1:
+                    if self.projection_combo.currentIndex() in (1, 3):
                         if (abs(px[i + 1] - px[i]) < 0.35 and
                                 abs(py[i + 1] - py[i]) < 0.35):
                             x_all.extend([px[i], px[i + 1], np.nan])
@@ -1418,20 +1827,25 @@ class MainWindow(QMainWindow):
                             continue
                         plot_az = self.local_azimuth(az)
                         line_x, line_y = self.project_local(plot_az, alt)
-                        if self.projection_combo.currentIndex() == 1:
+                        if self.projection_combo.currentIndex() in (1, 3):
                             append_projected_segment(c_x, c_y, line_x[0], line_y[0], line_x[1], line_y[1])
                         else:
                             append_sky_segment(c_x, c_y, line_x[0], line_y[0], line_x[1], line_y[1])
                     else:
                         x1, y1 = self.project_global([ra1], [dec1])
                         x2, y2 = self.project_global([ra2], [dec2])
-                        if self.projection_combo.currentIndex() != 1:
+                        if self.projection_combo.currentIndex() not in (1, 3):
                             append_sky_segment(c_x, c_y, x1[0], y1[0], x2[0], y2[0])
                         else:
                             append_projected_segment(c_x, c_y, x1[0], y1[0], x2[0], y2[0])
 
             if c_x:
-                const_item = pg.PlotCurveItem(x=np.array(c_x), y=np.array(c_y), pen=pg.mkPen(color=(255, 255, 255, 120), width=0.8), connect="finite")
+                const_item = pg.PlotCurveItem(
+                    x=np.array(c_x),
+                    y=np.array(c_y),
+                    pen=pg.mkPen(color=(105, 220, 145, 155), width=0.9),
+                    connect="finite",
+                )
                 const_item.setZValue(15)
                 self.plot_widget.addItem(const_item)
 

@@ -2,6 +2,20 @@
 
 V tomto souboru jsou zaznamenány významné změny projektu SkyCoverage.
 
+## 2026-10-03
+
+### Přidáno
+
+- Stereografická projekce pro úhlově věrnější tvary souhvězdí; v lokálním pohledu má zenit uprostřed a obzor jako kružnici.
+- Volitelná Bayerova označení jasných hvězd řeckými písmeny. Při přiblížení se zobrazují hvězdy až do 4 mag.
+- Barevné odstíny hvězd podle indexu B−V a jemná záře nejjasnějších hvězd.
+
+### Změněno
+
+- Grafické rozhraní používá moderní tmavé panely, sjednocené ovládací prvky, výraznější stavové informace a samostatný souřadnicový panel.
+- Mapa zachovává stejné měřítko obou os, takže se geometrie projekcí neroztahuje podle poměru stran okna.
+- Spojnice souhvězdí jsou zelené a jejich hranice tlumeně jantarové pro snazší rozlišení.
+
 ## 2026-09-26
 
 ### Přidáno

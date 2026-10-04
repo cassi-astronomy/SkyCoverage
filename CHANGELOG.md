@@ -2,6 +2,13 @@
 
 V tomto souboru jsou zaznamenány významné změny projektu SkyCoverage.
 
+## 2026-10-04
+
+### Přidáno
+
+- Volitelná vrstva aktuálních poloh Merkuru, Venuše, Marsu, Jupiteru, Saturnu, Uranu a Neptunu s barevnými značkami, astronomickými symboly a popisky.
+- V lokálním pohledu se planety zobrazují jen tehdy, když jsou nad obzorem.
+
 ## 2026-10-03
 
 ### Přidáno

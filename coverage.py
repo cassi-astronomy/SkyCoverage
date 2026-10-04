@@ -42,6 +42,16 @@ BAYER_GREEK = {
 }
 SUPERSCRIPT_DIGITS = str.maketrans("0123456789", "⁰¹²³⁴⁵⁶⁷⁸⁹")
 
+PLANET_STYLES = {
+    "mercury": ("☿ Merkur", (190, 195, 205, 255), 8),
+    "venus": ("♀ Venuše", (255, 235, 175, 255), 11),
+    "mars": ("♂ Mars", (255, 115, 75, 255), 9),
+    "jupiter": ("♃ Jupiter", (245, 205, 145, 255), 13),
+    "saturn": ("♄ Saturn", (235, 195, 105, 255), 12),
+    "uranus": ("♅ Uran", (130, 225, 235, 255), 9),
+    "neptune": ("♆ Neptun", (100, 145, 255, 255), 9),
+}
+
 
 def greek_bayer_label(value):
     """Convert the abbreviated HYG Bayer field to a Greek label."""
@@ -479,6 +489,15 @@ class MainWindow(QMainWindow):
         self.bayer_labels_check.setObjectName("coolCheck")
         self.bayer_labels_check.stateChanged.connect(self.request_redraw)
         control_panel2.addWidget(self.bayer_labels_check)
+
+        self.planets_check = QCheckBox("Planety")
+        self.planets_check.setChecked(True)
+        self.planets_check.setToolTip(
+            "Zobrazit nebo skrýt Merkur, Venuši, Mars, Jupiter, Saturn, Uran a Neptun"
+        )
+        self.planets_check.setObjectName("coolCheck")
+        self.planets_check.stateChanged.connect(self.request_redraw)
+        control_panel2.addWidget(self.planets_check)
 
         control_panel2.addStretch()
         main_layout.addWidget(secondary_controls)
@@ -1334,6 +1353,63 @@ class MainWindow(QMainWindow):
         item.setZValue(z_value)
         self.plot_widget.addItem(item)
 
+    def add_planets(self, eval_time, frame_altaz, is_local):
+        """Draw the seven planets, hiding locally below-horizon bodies."""
+        if not self.planets_check.isChecked():
+            return
+
+        label_font = QFont("Segoe UI Symbol", 9, QFont.Weight.DemiBold)
+        for body_name, (label_text, color, marker_size) in PLANET_STYLES.items():
+            body = get_body(body_name, eval_time)
+            if is_local:
+                body_altaz = body.transform_to(frame_altaz)
+                altitude = float(body_altaz.alt.deg)
+                if altitude < 0.0:
+                    continue
+                azimuth = float(body_altaz.az.deg)
+                x_values, y_values = self.project_local(
+                    self.local_azimuth([azimuth]), [altitude]
+                )
+            else:
+                x_values, y_values = self.project_global(
+                    [float(body.ra.deg)], [float(body.dec.deg)]
+                )
+
+            x_value = float(np.asarray(x_values)[0])
+            y_value = float(np.asarray(y_values)[0])
+            if not np.isfinite(x_value) or not np.isfinite(y_value):
+                continue
+
+            halo = pg.ScatterPlotItem(
+                x=[x_value],
+                y=[y_value],
+                size=marker_size * 2.4,
+                brush=pg.mkBrush(color[0], color[1], color[2], 42),
+                pen=None,
+            )
+            halo.setZValue(23)
+            self.plot_widget.addItem(halo)
+
+            marker = pg.ScatterPlotItem(
+                x=[x_value],
+                y=[y_value],
+                size=marker_size,
+                brush=pg.mkBrush(color),
+                pen=pg.mkPen((245, 250, 255, 210), width=0.8),
+            )
+            marker.setZValue(24)
+            self.plot_widget.addItem(marker)
+
+            label = pg.TextItem(
+                text=label_text,
+                color=color,
+                anchor=(-0.22, 0.68),
+            )
+            label.setFont(label_font)
+            label.setZValue(25)
+            label.setPos(x_value, y_value)
+            self.plot_widget.addItem(label)
+
     def refresh_bayer_labels(self):
         for item in self.bayer_label_items:
             try:
@@ -1703,9 +1779,21 @@ class MainWindow(QMainWindow):
             self.refresh_bayer_labels()
 
         if not is_local or sun_altitude >= -30:
-            self.plot_widget.addItem(pg.ScatterPlotItem(x=sun_x, y=sun_y, size=18, brush='#ffcc00', pen=pg.mkPen('w', width=1.5)))
+            sun_item = pg.ScatterPlotItem(
+                x=sun_x, y=sun_y, size=18,
+                brush='#ffcc00', pen=pg.mkPen('w', width=1.5),
+            )
+            sun_item.setZValue(24)
+            self.plot_widget.addItem(sun_item)
         if not is_local or moon_altitude >= 0:
-            self.plot_widget.addItem(pg.ScatterPlotItem(x=moon_x, y=moon_y, size=12, brush='#eeeeee', pen=pg.mkPen('b', width=1)))
+            moon_item = pg.ScatterPlotItem(
+                x=moon_x, y=moon_y, size=12,
+                brush='#eeeeee', pen=pg.mkPen('b', width=1),
+            )
+            moon_item.setZValue(24)
+            self.plot_widget.addItem(moon_item)
+
+        self.add_planets(eval_time, frame_altaz, is_local)
 
         # 2. Elongační kružnice kolem Slunce (20° až 70°)
         angles = np.linspace(0, 2*np.pi, 120)

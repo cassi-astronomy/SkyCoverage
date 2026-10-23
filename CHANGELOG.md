@@ -1,12 +1,67 @@
 # Přehled změn
 
+## 2026-10-23
+
+### Opraveno
+
+- Horní ovládací karta na široké obrazovce využívá volné místo ve dvou řádcích a v užším okně se automaticky přeskupí, takže zbytečně neposouvá mapu dolů.
+- Podbarvení pod obzorem ve stereografické projekci používá hladkou vektorovou kružnici bez viditelných rastrových zubů.
+- Texty u číselných polí plánovače a editoru sestav jsou oddělené od hodnot, takže se při užším panelu neschovávají pod ovládací šipky ani neořezávají zleva.
+
+### Přidáno
+
+- Souřadnicový panel ukazuje výšku Slunce a zda je pro zvolený čas a observatoř nad, pod, nebo právě na obzoru.
+- Profil sestavy obsahuje dobu vyčtení snímku a průměrnou dobu přejezdu montáže mezi poli; plánovač z nich, počtu polí, cyklů a délky expozice průběžně odhaduje celkovou délku sekvence.
+
+### Změněno
+
+- Vrstva planet zobrazuje Merkur až Neptun krátkými popisky `Me`, `Ve`, `Ma`, `Ju`, `Sa`, `Ur`, `Ne`; Pluto se nevykresluje.
+
+## 2026-10-22
+
+### Přidáno
+
+- Plánovač pozorování s umisťováním jednotlivých polí i mozaik kliknutím do mapy.
+- Profily vybavení s vlastní šířkou a výškou zorného pole, rotací kamery a ditheringem.
+- Generování expozičního skriptu kompatibilního s původním `off_CO.py`, včetně filtru, délky expozice a počtu cyklů.
+- Lokální archiv plánů, jehož jednotlivé vrstvy lze v mapě zapínat a vypínat.
+- Indikace data a stáří nejnovějších MPC dat a tlačítko pro bezpečnou aktualizaci z oficiálního balíčku.
+- Samostatné pracovní záložky pro velkou mapu pokrytí a plánování pozorování.
+- Tlačítka pro přiblížení, oddálení a obnovení celého pohledu bez kolečka myši.
+- Širokoúhlá MER Mercatorova projekce s výchozím zorným polem 116° a volitelným středem.
+- Živý čárkovaný náhled zorného pole nebo celé mozaiky pod kurzorem před umístěním kliknutím.
+- MER mapa se při tažení posouvá bez nákladného přepočtu projekce a všech MPC polí.
+- Vykreslení více než 100 000 MPC polí je v MER režimu vektorizované a oříznuté na aktuální výřez.
+- V lokálním MER pohledu je zakřivený obzor a oblast pod ním je světle hnědá s 90% průhledností; hvězdy, Slunce, Měsíc i plánovací vrstvy zůstávají viditelné.
+- MER je výchozí projekce; lokální pohled se podle zeměpisné šířky automaticky orientuje k jihu nebo severu, aby byl obzor dole.
+- Hvězdný katalog se při přiblížení rozšiřuje z 5 až na 7 mag.
+- Při větším zoomu se zobrazují DSO z OpenNGC do 11 mag jako jednoduché symboly bez názvů.
+- Komety do odhadované 17 mag se počítají pro zvolený čas z denně obnovovaných elementů MPC a v lokální mapě se filtrují podle obzoru.
+
+### Změněno
+
+- Místní archiv Sky Coverage uchovává posledních 92 dní vůči nejnovějším datům v balíčku.
+- Aktualizace MPC nejprve ověří a rozbalí nový archiv do dočasného umístění a až poté atomicky nahradí místní data.
+- Počet dní zobrazeného pokrytí se počítá od zvolené noci; chybějící novější MPC data se již nenahrazují starším obdobím.
+- Spojnice a hranice souhvězdí i kružnice výšek nad obzorem používají v MER správnou stupňovou škálu a nejsou už chybně odfiltrovány.
+- MER po dokončení posunu nebo zoomu znovu vystředí projekci na aktuální výřez; souhvězdí a ostatní vrstvy tak nejsou deformované podle původního pevného středu mapy.
+- Aktualizace Sky Coverage stahuje archiv z aktuální oficiální adresy MPC `/iau/data/skycov.tgz`.
+- Plánování používá pravý boční panel, zatímco mapa zůstává vysoká; hlavní ovládání využívá volné místo v hlavičce.
+- Archiv vlastních polí má výrazné barvy odlišné od tyrkysových polí MPC Sky Coverage.
+- Tlačítka soumraku přepnou mapu do lokálního MER pohledu a vystředí ji nad azimutem Slunce.
+- Stínování pod obzorem se určuje inverzní projekcí celého výřezu, takže se ani po posunu nepřevrátí; obzor má tmavě hnědou barvu.
+- Aktualizace MPC průběžně ukazuje stažená procenta a po dokončení výslovně oznámí nejnovější datum v balíčku.
+- Číselná pole času, počtu dnů a mezní magnitudy mají čitelnější kontrast, dostatek místa pro hodnotu a jednoznačné šipky nahoru/dolů; mění čas po minutě, období po dni a magnitudu po 0,5 mag.
+- Plánovač nabízí mozaiku vodorovnou s místním obzorem; u EQ sestavy zachová natočení kamery a automaticky zmenší rozteč podle paralaktického náklonu, aby zůstal alespoň zadaný minimální překryv.
+- Ukládání plánu navrhne název ve tvaru `datum_noci_sestava_Evening/Morning` a současně vytvoří samostatný textový soubor se souřadnicemi polí a pozorovacím skriptem.
+
 V tomto souboru jsou zaznamenány významné změny projektu SkyCoverage.
 
 ## 2026-10-04
 
 ### Přidáno
 
-- Volitelná vrstva aktuálních poloh Merkuru, Venuše, Marsu, Jupiteru, Saturnu, Uranu a Neptunu s barevnými značkami, astronomickými symboly a popisky.
+- Volitelná vrstva aktuálních poloh Merkuru, Venuše, Marsu, Jupiteru, Saturnu, Uranu a Neptunu s barevnými značkami a krátkými popisky.
 - V lokálním pohledu se planety zobrazují jen tehdy, když jsou nad obzorem.
 
 ## 2026-10-03

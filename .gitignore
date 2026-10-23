@@ -10,4 +10,7 @@ astro_cache/
 .venv/
 venv/
 *.log
+planner_data.json
+planner_data.json.tmp
+observation_plans/
 

@@ -1,4 +1,5 @@
 import tempfile
+from copy import deepcopy
 import unittest
 from datetime import datetime
 from pathlib import Path
@@ -14,6 +15,7 @@ from observation_planner import (
     safe_horizon_grid_steps,
     suggested_archive_name,
 )
+from coverage import planner_field_identity
 
 
 class ObservationPlannerTests(unittest.TestCase):
@@ -37,6 +39,14 @@ class ObservationPlannerTests(unittest.TestCase):
             self.assertGreaterEqual(field["dec_deg"], -90)
             self.assertLessEqual(field["dec_deg"], 90)
             self.assertEqual(len(field_outline(field)), 33)
+
+    def test_planner_field_identity_deduplicates_loaded_archive_geometry(self):
+        field = make_mosaic(15.0, -10.0, self.profile, 1, 1, 10)[0]
+        archived_copy = deepcopy(field)
+        archived_copy["mosaic_orientation"] = "horizon_eq"
+        self.assertEqual(
+            planner_field_identity(field), planner_field_identity(archived_copy)
+        )
 
     def test_script_uses_each_fields_dither(self):
         fields = make_mosaic(15.0, -10.0, self.profile, 1, 2, 10)

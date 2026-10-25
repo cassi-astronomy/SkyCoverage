@@ -1,5 +1,23 @@
 # Přehled změn
 
+## 2026-10-25
+
+### Přidáno
+
+- Vnější hranice Mléčné dráhy podle katalogu José R. Vieiry s jemnou výplní (90 % průhlednost) a vlastním přepínačem vrstvy; vnitřní jasové struktury se nevykreslují.
+- Měsíc ve vrstvě planet a údaj o jeho výšce a osvětlené fázi v horním souřadnicovém panelu.
+- Zřetelně světlejší modré pozadí mapy, když je Měsíc nad obzorem a nachází se více než tři dny od novu.
+- Jasné planetky do 12 mag z ročního katalogu MPC; při přiblížení pod 55° se zobrazují s decentním číselným popiskem.
+- Archiv plánů má tlačítko `Ukázat zapnuté`, které přizpůsobí výřez mapy všem označeným plánům, i když leží ve vzdálených částech oblohy.
+- Ovládání času obsahuje také jemné kroky `+10 min` a `-10 min`.
+
+### Změněno
+
+- Vodorovná mozaika s EQ kamerou je první a výchozí volbou orientace.
+- Galaktický rovník se už nevykresluje; nahrazují jej katalogové obrysy Mléčné dráhy.
+- Aktivní i archivní plánovaná pole používají jednu společnou oranžovou barvu; archivní pole mají 50% krytí a pole načteného archivního plánu se při současně zapnutém archivu nevykreslují podruhé.
+- Mapové projekce, geometrie vrstev a výpočty drah jsou oddělené od GUI; obálka Mléčné dráhy se připravuje pouze jednou po načtení katalogu.
+
 ## 2026-10-23
 
 ### Opraveno

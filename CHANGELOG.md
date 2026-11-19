@@ -1,5 +1,33 @@
 # Přehled změn
 
+## 2026-10-30
+
+### Změněno
+
+- Při zavírání okna s neuloženými poli plánu se aplikace zeptá, zda plán uložit, zavřít bez uložení, nebo zavírání zrušit. Za uložený se plán považuje po uložení do archivu nebo po načtení z archivu, dokud se pole nezmění.
+- Komety se na mapě kreslí znakem komety (hlava s ohonem) místo modrého kosočtverce. Popisek při přiblížení už obsahuje jen jméno a jasnost, bez znaku navíc.
+- Planetky se zobrazují do 14 mag (dříve 12 mag). Dráhy se berou z MPCORB, který se po stažení ořízne jen na planetky, které 14 mag mohou dosáhnout. Bez něj se použije původní roční seznam jasných planetek MPC (asi do 12 mag).
+- Komety a planetky se už nestahují automaticky při spuštění. Na kartě `Data MPC` jsou tlačítka `Stáhnout komety` a `Stáhnout planetky` s průběhem stahování v procentech a s údajem, kdy byla data stažena. Mapa se po stažení sama obnoví.
+- Planetky mají sytě žlutou barvu, aby se nepletly s oranžovými archivními poli. Při přiblížení pod 55° nesou číslo, pod 25° také jméno a jasnost (nejvýš 40 nejjasnějších popisků ve výřezu). Nečíslované planetky mají provizorní označení.
+- Polohy planetek se počítají vektorově v numpy pro celý katalog najednou.
+
+- Mapa je při posunu a přiblížení výrazně plynulejší. Překreslení mapy se zkrátilo z 1–2,5 s na zhruba 0,2 s. Hlavní brzdou byly obrysy archivních a plánovaných polí, které se počítaly přes astropy bod po bodu (asi 30 ms na pole). Teď se počítají vektorově v numpy.
+- Převod ICRS ↔ Alt/Az používá matici v cache pro zvolený čas a observatoř místo opakovaných volání astropy (rozdíl pod 0,01°). Měsíc a planety se dál počítají topocentricky přes astropy, jen jednou pro daný čas.
+- Údaj souřadnic pod kurzorem se počítá v řádu desetin milisekundy, nejvýš 60× za sekundu, a během tažení mapy vůbec. Náhled mozaiky pod kurzorem se zrychlil zhruba stokrát (3×3 pole z ~450 ms na ~3 ms).
+- Výplň Mléčné dráhy, stínování pod obzorem, DSO, komety, planetky a Bayerovy popisky se po posunu nebo zoomu obnoví samostatně, bez celého překreslení. Rastry pokrývají i okolí výřezu, takže se při posunu neodhalí nevykreslený okraj. DSO a planetky se nově objeví i po přiblížení tlačítky.
+- Katalogy hvězd, zorných polí MPC a souhvězdí se převádějí na numpy pole jednou po načtení. Čáry se skládají vektorově.
+
+### Opraveno
+
+- V globálním zobrazení se komety skrývaly podle toho, zda jsou nad obzorem zvolené observatoře, takže se při změně místa objevovaly a mizely. Obzor se teď uplatní jen v horizontálním zobrazení, stejně jako u planetek.
+- Dithering prvního pole v expozičním skriptu byl jen kladným směrem (`rand(0, d)`), takže pole bylo v průměru posunuté o polovinu ditheru. Nyní je u všech polí rozsah symetrický kolem středu (`±d/2`) podle ditheru z profilu sestavy.
+- Při zobrazení v `SEČ`/`SELČ` se celá obloha počítala pro čas posunutý o 1–2 hodiny, protože se zobrazený místní čas bral jako UTC. Export plánu nyní v řádku „Čas mapy (UTC)“ uvádí skutečný UTC čas.
+- Úklid dat MPC by od roku 2031 považoval všechny soubory za neplatné a smazal je (pevný horní limit roku 2030). Limit se teď odvíjí od aktuálního roku.
+- Změna času v lokálním pohledu už neresetuje ruční posun a přiblížení mapy.
+- Elongační kružnice se kreslily s falešnými spojnicemi přes přerušení (chyběl `connect="finite"`), což bylo vidět hlavně ve stereografické a MER projekci.
+- Kreutzovy koridory se počítaly přes chybnou dvojitou změnu počátku souřadnic (barycentrum/Slunce). Teď se počítají přímo a jsou výrazně rychlejší.
+- Signály změny času a observatoře už nejsou na překreslení napojené dvakrát.
+
 ## 2026-10-25
 
 ### Přidáno
@@ -10,6 +38,7 @@
 - Jasné planetky do 12 mag z ročního katalogu MPC; při přiblížení pod 55° se zobrazují s decentním číselným popiskem.
 - Archiv plánů má tlačítko `Ukázat zapnuté`, které přizpůsobí výřez mapy všem označeným plánům, i když leží ve vzdálených částech oblohy.
 - Ovládání času obsahuje také jemné kroky `+10 min` a `-10 min`.
+- Čas lze zobrazit v `UTC`, `SELČ` (UTC+2), nebo `SEČ` (UTC+1); zvolené pásmo se obnoví při dalším spuštění.
 
 ### Změněno
 
@@ -17,6 +46,12 @@
 - Galaktický rovník se už nevykresluje; nahrazují jej katalogové obrysy Mléčné dráhy.
 - Aktivní i archivní plánovaná pole používají jednu společnou oranžovou barvu; archivní pole mají 50% krytí a pole načteného archivního plánu se při současně zapnutém archivu nevykreslují podruhé.
 - Mapové projekce, geometrie vrstev a výpočty drah jsou oddělené od GUI; obálka Mléčné dráhy se připravuje pouze jednou po načtení katalogu.
+- Hranice souhvězdí, kružnice výšky nad obzorem a zorná pole MPC mají odlišnější barvy, styly a hierarchii; hustá vrstva zorných polí je jemnější a výškové kružnice po 10° jsou zřetelnější než azimutální mřížka.
+
+### Opraveno
+
+- Ranní soumrak vybírá nejbližší budoucí ranní průchod zvolené výšky Slunce. Po půlnoci proto zůstává u právě nadcházejícího rána a nepřeskakuje automaticky na další den.
+- Archiv plánů vyhrazuje hlavní prostor názvu plánu, aby bylo čitelné datum pozorování na jeho začátku. Datum uložení zobrazuje jen den; celý obsah buněk zůstává dostupný v tooltipu.
 
 ## 2026-10-23
 

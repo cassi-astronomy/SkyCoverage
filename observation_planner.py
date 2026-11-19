@@ -10,6 +10,7 @@ from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 
 import astropy.units as u
+import numpy as np
 from astropy.coordinates import SkyCoord
 
 
@@ -26,6 +27,9 @@ DEFAULT_DATA = {
         }
     ],
     "archives": [],
+    "settings": {
+        "time_zone": "UTC",
+    },
 }
 
 
@@ -46,6 +50,8 @@ class PlannerStore:
                     profile.setdefault("slew_seconds", 0.0)
             if isinstance(loaded.get("archives"), list):
                 self.data["archives"] = loaded["archives"]
+            if isinstance(loaded.get("settings"), dict):
+                self.data["settings"].update(loaded["settings"])
         except (OSError, ValueError, TypeError, AttributeError):
             pass
 
@@ -57,15 +63,40 @@ class PlannerStore:
         os.replace(temporary_path, self.path)
 
 
+def offset_coordinates(ra_deg, dec_deg, east_deg, north_deg):
+    """Vectorised tangent-plane offset of ICRS coordinates.
+
+    Uses the same great-circle formula as astropy's ``directional_offset_by``
+    (position angle measured from north through east), but in plain numpy so
+    that whole field outlines can be computed without per-point SkyCoord
+    objects.  Returns ``(ra_deg, dec_deg)`` arrays with RA in [0, 360).
+    """
+    lon = np.radians(np.asarray(ra_deg, dtype=float))
+    lat = np.radians(np.asarray(dec_deg, dtype=float))
+    east = np.asarray(east_deg, dtype=float)
+    north = np.asarray(north_deg, dtype=float)
+    distance = np.radians(np.hypot(east, north))
+    position_angle = np.arctan2(east, north)
+    sin_lat, cos_lat = np.sin(lat), np.cos(lat)
+    sin_distance, cos_distance = np.sin(distance), np.cos(distance)
+    new_sin_lat = np.clip(
+        sin_lat * cos_distance + cos_lat * sin_distance * np.cos(position_angle),
+        -1.0, 1.0,
+    )
+    new_lat = np.arcsin(new_sin_lat)
+    new_lon = lon + np.arctan2(
+        np.sin(position_angle) * sin_distance * cos_lat,
+        cos_distance - sin_lat * new_sin_lat,
+    )
+    return np.degrees(new_lon) % 360.0, np.degrees(new_lat)
+
+
 def offset_coordinate(ra_deg, dec_deg, east_deg, north_deg):
     """Offset an ICRS coordinate in its local tangent plane."""
-    origin = SkyCoord(ra=ra_deg * u.deg, dec=dec_deg * u.deg, frame="icrs")
-    distance = math.hypot(east_deg, north_deg)
-    if distance == 0:
-        return float(origin.ra.deg), float(origin.dec.deg)
-    position_angle = math.atan2(east_deg, north_deg) * u.rad
-    target = origin.directional_offset_by(position_angle, distance * u.deg)
-    return float(target.ra.deg % 360.0), float(target.dec.deg)
+    if math.hypot(east_deg, north_deg) == 0:
+        return float(ra_deg) % 360.0, float(dec_deg)
+    ra, dec = offset_coordinates(ra_deg, dec_deg, east_deg, north_deg)
+    return float(ra), float(dec)
 
 
 def rotated_offset(x_deg, y_deg, rotation_deg):
@@ -172,6 +203,20 @@ def format_duration(seconds):
     return " ".join(parts)
 
 
+def format_archive_timestamp(value):
+    """Return the UTC calendar day when an archive was saved."""
+    text = str(value or "").strip()
+    if not text or len(text) <= 10:
+        return text
+    try:
+        parsed = datetime.fromisoformat(
+            text[:-1] + "+00:00" if text.endswith("Z") else text
+        )
+    except ValueError:
+        return text
+    return parsed.strftime("%Y-%m-%d")
+
+
 def export_plan_text(directory, archive, observation_time_utc="", observatory=""):
     """Atomically export one archived observing plan to one UTF-8 text file."""
     os.makedirs(directory, exist_ok=True)
@@ -254,32 +299,37 @@ def make_mosaic(ra_deg, dec_deg, profile, rows=1, columns=1, overlap_percent=10.
     return result
 
 
-def field_outline(field, samples_per_edge=8):
-    """Return sampled ICRS vertices for a rotated rectangular field."""
+def field_outline_arrays(field, samples_per_edge=8):
+    """Return sampled ICRS outline of a rotated rectangular field as arrays."""
     profile = field["profile"]
     half_width = float(profile["width_deg"]) / 2.0
     half_height = float(profile["height_deg"]) / 2.0
-    rotation = float(profile["rotation_deg"])
-    corners = [
+    rotation = math.radians(float(profile["rotation_deg"]))
+    corners = np.array([
         (-half_width, -half_height),
         (-half_width, half_height),
         (half_width, half_height),
         (half_width, -half_height),
         (-half_width, -half_height),
-    ]
-    vertices = []
-    for start, end in zip(corners[:-1], corners[1:]):
-        for index in range(samples_per_edge):
-            fraction = index / float(samples_per_edge)
-            x = start[0] + fraction * (end[0] - start[0])
-            y = start[1] + fraction * (end[1] - start[1])
-            east, north = rotated_offset(x, y, rotation)
-            vertices.append(offset_coordinate(
-                field["ra_deg"], field["dec_deg"], east, north
-            ))
-    east, north = rotated_offset(corners[-1][0], corners[-1][1], rotation)
-    vertices.append(offset_coordinate(field["ra_deg"], field["dec_deg"], east, north))
-    return vertices
+    ])
+    fractions = np.arange(samples_per_edge, dtype=float) / float(samples_per_edge)
+    start, end = corners[:-1], corners[1:]
+    points = (
+        start[:, None, :] + fractions[None, :, None] * (end - start)[:, None, :]
+    ).reshape(-1, 2)
+    points = np.vstack((points, corners[-1:]))
+    x, y = points[:, 0], points[:, 1]
+    east = x * math.cos(rotation) - y * math.sin(rotation)
+    north = x * math.sin(rotation) + y * math.cos(rotation)
+    return offset_coordinates(
+        float(field["ra_deg"]), float(field["dec_deg"]), east, north
+    )
+
+
+def field_outline(field, samples_per_edge=8):
+    """Return sampled ICRS vertices for a rotated rectangular field."""
+    ra, dec = field_outline_arrays(field, samples_per_edge)
+    return [(float(a), float(b)) for a, b in zip(ra, dec)]
 
 
 def format_ra_dec(ra_deg, dec_deg):
@@ -303,13 +353,11 @@ def generate_exposure_script(fields, filter_name, exposure_seconds, loops):
         raw_delta_ra = (float(field["ra_deg"]) - float(first["ra_deg"]) + 180.0) % 360.0 - 180.0
         delta_dec = float(field["dec_deg"]) - float(first["dec_deg"])
         dither = float(field["profile"].get("dither_deg", 0.05))
-        if field is first:
-            ra_low, ra_high = 0.0, dither
-            dec_low, dec_high = 0.0, dither
-        else:
-            half = dither / 2.0
-            ra_low, ra_high = raw_delta_ra - half, raw_delta_ra + half
-            dec_low, dec_high = delta_dec - half, delta_dec + half
+        # The dither range is centred on every field, the first one included,
+        # so no field is systematically shifted from its planned centre.
+        half = dither / 2.0
+        ra_low, ra_high = raw_delta_ra - half, raw_delta_ra + half
+        dec_low, dec_high = delta_dec - half, delta_dec + half
         commands.append(
             "for 1 { T0.WOFFS=(rand(%.3f,%.3f),rand(%.3f,%.3f)) E %g }"
             % (ra_low, ra_high, dec_low, dec_high, float(exposure_seconds))

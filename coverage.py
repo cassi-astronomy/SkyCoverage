@@ -19,9 +19,13 @@ from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QTableWidget, QTableWidgetItem, QHeaderView,
                              QInputDialog, QMessageBox, QAbstractItemView,
                              QGridLayout, QGraphicsItem, QGraphicsPathItem,
-                             QSplitter)
-from PyQt6.QtCore import QThread, pyqtSignal, Qt, QDateTime, QTimer, QSize, QRectF
-from PyQt6.QtGui import QBrush, QColor, QFont, QPainter, QPainterPath, QPen
+                             QSplitter, QProgressBar)
+from PyQt6.QtCore import (
+    QThread, pyqtSignal, Qt, QDateTime, QTimer, QSize, QRectF, QTimeZone,
+)
+from PyQt6.QtGui import (
+    QBrush, QColor, QFont, QPainter, QPainterPath, QPen, QTransform,
+)
 import pyqtgraph as pg
 
 import astropy.units as u
@@ -29,21 +33,27 @@ from astropy.time import Time
 from astropy.utils import iers
 from astropy.coordinates import (get_sun, get_body, EarthLocation, SkyCoord,
                                  AltAz, GeocentricTrueEcliptic,
-                                 HeliocentricMeanEcliptic, get_body_barycentric)
+                                 get_body_barycentric)
 
 from observation_planner import (
     PlannerStore, estimate_sequence_duration, export_plan_text, field_outline,
-    format_duration, generate_exposure_script, make_mosaic, new_archive,
-    offset_coordinate, rotated_offset, safe_horizon_grid_steps,
-    suggested_archive_name,
+    format_archive_timestamp, format_duration, generate_exposure_script,
+    make_mosaic, new_archive,
+    field_outline_arrays, offset_coordinate, offset_coordinates,
+    rotated_offset, safe_horizon_grid_steps, suggested_archive_name,
 )
+from astronomy_time import next_twilight_crossing
 from orbital_mechanics import (
+    asteroid_apparent_positions, asteroid_brightest_possible_magnitude,
+    build_asteroid_arrays, calendar_jd,
     asteroid_heliocentric_ecliptic as propagate_asteroid,
     comet_heliocentric_ecliptic as propagate_comet,
 )
 from sky_geometry import (
     LAMBERT_Y_SCALE, STEREO_VIEW_RADIUS,
-    append_projected_segment, append_sky_segment,
+    angular_separation, append_projected_segment, append_sky_segment,
+    fit_rotation, polyline_segments, projected_segments, rotate_angles,
+    sky_segments, unit_vectors,
     inverse_global as inverse_global_coordinates,
     inverse_local as inverse_local_coordinates,
     inverse_oblique_mercator as inverse_oblique_mercator_coordinates,
@@ -60,6 +70,60 @@ class MinuteStepDateTimeEdit(QDateTimeEdit):
     def stepBy(self, steps):
         self.setDateTime(self.dateTime().addSecs(int(steps) * 60))
         self.setCurrentSection(QDateTimeEdit.Section.MinuteSection)
+
+
+_COMET_SYMBOL = None
+
+
+def comet_symbol():
+    """Return a comet glyph in the shape of U+2604 as a unit scatter symbol.
+
+    The shape is drawn as vectors (a round head with three tapered streaks
+    towards the upper right) so it stays solid and legible at marker sizes,
+    independent of which symbol fonts are installed.
+    """
+    global _COMET_SYMBOL
+    if _COMET_SYMBOL is not None:
+        return _COMET_SYMBOL
+    head_x, head_y, head_radius = -0.27, 0.27, 0.2
+    path = QPainterPath()
+    path.addEllipse(
+        head_x - head_radius, head_y - head_radius,
+        2.0 * head_radius, 2.0 * head_radius,
+    )
+    # Screen y points down, so the tail direction (upper right) is -45°.
+    for offset_deg, length, half_width in ((-17.0, 0.68, 0.075),
+                                          (0.0, 0.82, 0.095),
+                                          (17.0, 0.68, 0.075)):
+        angle = math.radians(-45.0 + offset_deg)
+        ux, uy = math.cos(angle), math.sin(angle)
+        nx, ny = -uy, ux
+        base_x = head_x + ux * head_radius * 0.35
+        base_y = head_y + uy * head_radius * 0.35
+        streak = QPainterPath()
+        streak.moveTo(base_x + nx * half_width, base_y + ny * half_width)
+        streak.lineTo(base_x + ux * length, base_y + uy * length)
+        streak.lineTo(base_x - nx * half_width, base_y - ny * half_width)
+        streak.closeSubpath()
+        path = path.united(streak)
+    bounds = path.boundingRect()
+    scale = 1.0 / max(bounds.width(), bounds.height(), 1e-9)
+    transform = QTransform()
+    transform.scale(scale, scale)
+    transform.translate(-bounds.center().x(), -bounds.center().y())
+    _COMET_SYMBOL = transform.map(path)
+    return _COMET_SYMBOL
+
+
+def enable_pan_cache(item):
+    """Cache a static vector layer as a device-space bitmap.
+
+    While the map is only translated, Qt moves the cached bitmap instead of
+    stroking tens of thousands of segments (or slow dashed pens) on every
+    frame.  A zoom re-renders the cache, so lines stay sharp.
+    """
+    item.setCacheMode(QGraphicsItem.CacheMode.DeviceCoordinateCache)
+    return item
 
 
 class AntialiasedPathItem(QGraphicsPathItem):
@@ -90,6 +154,19 @@ BRIGHT_ASTEROIDS_URL = (
     "https://www.minorplanetcenter.net/iau/Ephemerides/Bright/"
     "{year}/Soft00Bright.txt"
 )
+MPCORB_URL = "https://www.minorplanetcenter.net/iau/MPCORB/MPCORB.DAT.gz"
+MPCORB_BRIGHT_FILE = "MPCORB-bright.txt"
+ASTEROID_MAGNITUDE_LIMIT = 14.0
+# Orbits that can never get brighter than this are dropped already while the
+# large MPCORB file is filtered, which keeps the cached subset small.
+ASTEROID_CATALOG_MARGIN = 0.5
+ASTEROID_MARKER_FOV = 55.0
+ASTEROID_DETAIL_FOV = 25.0
+ASTEROID_NUMBER_LABELS = 40
+ASTEROID_DETAIL_LABELS = 40
+ASTEROID_FILL_COLOR = (255, 226, 40, 225)
+ASTEROID_EDGE_COLOR = (255, 248, 170, 240)
+ASTEROID_LABEL_COLOR = (255, 232, 95, 220)
 MILKY_WAY_CONTOURS_URL = (
     "https://raw.githubusercontent.com/ofrohn/d3-celestial/master/data/mw.json"
 )
@@ -100,6 +177,17 @@ SKY_BACKGROUND_DARK = "#060a18"
 SKY_BACKGROUND_MOONLIT = "#131d34"
 PLANNER_OVERLAY_COLOR = (255, 165, 55, 225)
 ARCHIVE_OVERLAY_COLOR = (255, 165, 55, 128)
+CONSTELLATION_BOUNDARY_COLOR = (165, 125, 180, 78)
+SKYCOV_FOOTPRINT_COLOR = (55, 165, 180, 16)
+AZIMUTH_MINOR_COLOR = (85, 105, 125, 22)
+AZIMUTH_MAJOR_COLOR = (105, 130, 155, 48)
+ALTITUDE_MINOR_COLOR = (145, 178, 212, 145)
+ALTITUDE_MAJOR_COLOR = (180, 210, 238, 205)
+TIME_ZONE_OFFSETS = {
+    "UTC": 0,
+    "SELČ": 2 * 3600,
+    "SEČ": 1 * 3600,
+}
 
 BAYER_GREEK = {
     "Alp": "α", "Bet": "β", "Gam": "γ", "Del": "δ", "Eps": "ε",
@@ -119,6 +207,27 @@ PLANET_STYLES = {
     "uranus": ("Ur", (130, 225, 235, 255), 9),
     "neptune": ("Ne", (100, 145, 255, 255), 9),
 }
+
+
+def qdatetime_to_utc(value):
+    """Return an aware UTC ``datetime`` for a ``QDateTime`` in any time zone.
+
+    ``QDateTime.toPyDateTime()`` drops the zone and returns the displayed wall
+    clock; astropy would then interpret SEČ/SELČ as UTC and shift the whole
+    sky by one or two hours.
+    """
+    return datetime.fromtimestamp(int(value.toSecsSinceEpoch()), tz=timezone.utc)
+
+
+def qdatetime_to_time(value):
+    """Return an astropy ``Time`` (UTC) for a ``QDateTime`` in any time zone."""
+    return Time(qdatetime_to_utc(value).replace(tzinfo=None), scale="utc")
+
+
+def mpc_file_year_is_plausible(year, now=None):
+    """Accept MPC Sky Coverage years from 1990 up to next calendar year."""
+    current_year = (now or datetime.now(timezone.utc)).year
+    return 1990 <= int(year) <= current_year + 1
 
 
 def greek_bayer_label(value):
@@ -224,7 +333,7 @@ class PointingDataReader(QThread):
             return None
         try:
             year = int(base[:4])
-            if not (1990 <= year <= 2030):
+            if not mpc_file_year_is_plausible(year):
                 return None
             doy = int(base[4:])
             if 1 <= doy <= 366:
@@ -439,7 +548,11 @@ class StarCatalogReader(QThread):
 
 
 class SupplementCatalogReader(QThread):
-    """Load cached OpenNGC objects and refresh MPC small-body elements."""
+    """Load cached OpenNGC objects and locally stored MPC small-body elements.
+
+    Comet and asteroid orbits are never downloaded here; the user refreshes
+    them explicitly with :class:`SmallBodyDownloader` from the Data MPC tab.
+    """
 
     finished = pyqtSignal(object)
     progress = pyqtSignal(str)
@@ -545,40 +658,105 @@ class SupplementCatalogReader(QThread):
 
         month = packed_digit(value[3])
         day = packed_digit(value[4])
-        return float(Time(datetime(year, month, day), scale="tt").jd)
+        datetime(year, month, day)  # validates the calendar date
+        return float(calendar_jd(year, month, day))
+
+    @staticmethod
+    def parse_readable_designation(readable, packed=""):
+        """Split MPC's readable designation into (number, name)."""
+        readable = readable.strip()
+        match = re.match(r"\((\d+)\)\s*(.*)", readable)
+        if match:
+            return int(match.group(1)), match.group(2).strip()
+        if not readable and packed.strip().isdigit():
+            return int(packed), ""
+        return None, readable or packed.strip()
+
+    @staticmethod
+    def asteroid_label(element, detailed=False, magnitude=None):
+        """Return a compact or detailed map label for an asteroid."""
+        number = element.get("number")
+        name = element.get("name", "")
+        short = str(number) if number is not None else name
+        if not detailed:
+            return short
+        text = f"{number} {name}".strip() if number is not None else name
+        if magnitude is not None and np.isfinite(magnitude):
+            text += f"  {magnitude:.1f}m"
+        return text
 
     @classmethod
     def load_bright_asteroids(cls, path):
-        """Read numbered objects from MPC's annual bright-asteroid list."""
+        """Read MPC asteroid orbits (MPCORB format, e.g. Soft00Bright)."""
         objects = []
+        epoch_cache = {}
         with open(path, "r", encoding="ascii", errors="ignore") as source:
             for line in source:
-                if len(line) < 167:
+                if len(line) < 104:
                     continue
                 try:
-                    readable = line[166:194].strip()
-                    match = re.search(r"\((\d+)\)", readable)
-                    if match:
-                        number = int(match.group(1))
-                    elif line[:7].strip().isdigit():
-                        number = int(line[:7])
-                    else:
+                    readable = line[166:194] if len(line) > 166 else ""
+                    number, name = cls.parse_readable_designation(
+                        readable, line[:7]
+                    )
+                    if number is None and not name:
+                        continue
+                    packed_epoch = line[20:25]
+                    if packed_epoch not in epoch_cache:
+                        epoch_cache[packed_epoch] = cls.unpack_mpc_date(packed_epoch)
+                    eccentricity = float(line[70:79])
+                    if not 0.0 <= eccentricity < 1.0:
                         continue
                     objects.append({
                         "number": number,
+                        "name": name,
                         "h": float(line[8:13]),
                         "g": float(line[14:19].strip() or "0.15"),
-                        "epoch_jd": cls.unpack_mpc_date(line[20:25]),
+                        "epoch_jd": epoch_cache[packed_epoch],
                         "mean_anomaly": float(line[26:35]),
                         "arg_peri": float(line[37:46]),
                         "node": float(line[48:57]),
                         "inclination": float(line[59:68]),
-                        "e": float(line[70:79]),
+                        "e": eccentricity,
                         "a": float(line[92:103]),
                     })
                 except (TypeError, ValueError):
                     continue
         return objects
+
+    @staticmethod
+    def filter_mpcorb_lines(lines, magnitude_limit):
+        """Yield MPCORB orbit lines whose object can reach ``magnitude_limit``."""
+        for line in lines:
+            if len(line) < 104:
+                continue
+            try:
+                h = float(line[8:13])
+                eccentricity = float(line[70:79])
+                semi_major = float(line[92:103])
+            except ValueError:
+                continue
+            if semi_major <= 0.0 or not 0.0 <= eccentricity < 1.0:
+                continue
+            perihelion = semi_major * (1.0 - eccentricity)
+            if asteroid_brightest_possible_magnitude(h, perihelion) <= magnitude_limit:
+                yield line
+
+    @classmethod
+    def write_bright_mpcorb(cls, gz_path, output_path, magnitude_limit):
+        """Filter the full gzipped MPCORB into a small cached subset atomically."""
+        temporary_path = output_path + ".tmp"
+        count = 0
+        with gzip.open(gz_path, "rt", encoding="ascii", errors="ignore") as source, \
+                open(temporary_path, "w", encoding="ascii", newline="\n") as output:
+            for line in cls.filter_mpcorb_lines(source, magnitude_limit):
+                output.write(line.rstrip("\r\n") + "\n")
+                count += 1
+        if count == 0:
+            os.remove(temporary_path)
+            raise ValueError("MPCORB neobsahuje žádné použitelné dráhy")
+        os.replace(temporary_path, output_path)
+        return count
 
     @staticmethod
     def load_milky_way_contours(path):
@@ -617,6 +795,7 @@ class SupplementCatalogReader(QThread):
         asteroid_path = os.path.join(
             self.cache_dir, f"Soft00Bright-{self.asteroid_year}.txt"
         )
+        mpcorb_path = os.path.join(self.cache_dir, MPCORB_BRIGHT_FILE)
         milky_way_path = os.path.join(self.cache_dir, "mw.json")
         warnings = []
         try:
@@ -625,29 +804,6 @@ class SupplementCatalogReader(QThread):
                 self.download(OPENNGC_URL, dso_path)
         except Exception as error:
             warnings.append(f"OpenNGC: {error}")
-        try:
-            comet_age = (
-                datetime.now().timestamp() - os.path.getmtime(comet_path)
-                if os.path.exists(comet_path) else float("inf")
-            )
-            if comet_age > 24 * 3600:
-                self.progress.emit("Aktualizuji kometární elementy z MPC…")
-                self.download(COMET_ELEMENTS_URL, comet_path)
-        except Exception as error:
-            warnings.append(f"MPC komety: {error}")
-        try:
-            asteroid_age = (
-                datetime.now().timestamp() - os.path.getmtime(asteroid_path)
-                if os.path.exists(asteroid_path) else float("inf")
-            )
-            if asteroid_age > 7 * 24 * 3600:
-                self.progress.emit("Aktualizuji jasné planetky z MPC…")
-                self.download(
-                    BRIGHT_ASTEROIDS_URL.format(year=self.asteroid_year),
-                    asteroid_path,
-                )
-        except Exception as error:
-            warnings.append(f"MPC planetky: {error}")
         try:
             if not os.path.exists(milky_way_path):
                 self.progress.emit("Stahuji obrysy Mléčné dráhy…")
@@ -665,14 +821,22 @@ class SupplementCatalogReader(QThread):
         except Exception as error:
             comets = []
             warnings.append(f"MPC parser komet: {error}")
+        asteroids = []
         try:
-            asteroids = (
-                self.load_bright_asteroids(asteroid_path)
-                if os.path.exists(asteroid_path) else []
-            )
+            if os.path.exists(mpcorb_path):
+                asteroids = self.load_bright_asteroids(mpcorb_path)
         except Exception as error:
-            asteroids = []
-            warnings.append(f"MPC parser planetek: {error}")
+            warnings.append(f"MPCORB parser: {error}")
+        if not asteroids:
+            # Fallback: MPC's annual list of bright asteroids (about V <= 12).
+            try:
+                asteroids = (
+                    self.load_bright_asteroids(asteroid_path)
+                    if os.path.exists(asteroid_path) else []
+                )
+            except Exception as error:
+                asteroids = []
+                warnings.append(f"MPC parser planetek: {error}")
         try:
             milky_way = (
                 self.load_milky_way_contours(milky_way_path)
@@ -684,6 +848,88 @@ class SupplementCatalogReader(QThread):
         self.finished.emit((
             deep_sky, comets, asteroids, milky_way, "; ".join(warnings)
         ))
+
+
+class SmallBodyDownloader(QThread):
+    """Download MPC comet or asteroid orbits on request, reporting percent."""
+
+    progress = pyqtSignal(int, str)
+    finished = pyqtSignal(bool, str)
+
+    def __init__(self, cache_dir, kind):
+        super().__init__()
+        self.cache_dir = cache_dir
+        self.kind = kind
+
+    def download_with_progress(self, url, path, label):
+        temporary_path = path + ".tmp"
+        request = urllib.request.Request(
+            url, headers={"User-Agent": "SkyCoverage planner/1.0"}
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=60) as response, open(
+                    temporary_path, "wb") as output:
+                total_size = int(response.headers.get("Content-Length") or 0)
+                downloaded = 0
+                last_percent = -1
+                self.progress.emit(0 if total_size else -1, f"{label}…")
+                while True:
+                    chunk = response.read(256 * 1024)
+                    if not chunk:
+                        break
+                    output.write(chunk)
+                    downloaded += len(chunk)
+                    megabytes = downloaded / 1024 ** 2
+                    if total_size:
+                        percent = min(100, int(downloaded * 100 / total_size))
+                        if percent != last_percent:
+                            self.progress.emit(
+                                percent,
+                                f"{label}… {percent} % ({megabytes:.1f} / "
+                                f"{total_size / 1024 ** 2:.1f} MiB)",
+                            )
+                            last_percent = percent
+                    else:
+                        self.progress.emit(-1, f"{label}… {megabytes:.1f} MiB")
+                if total_size and downloaded < total_size:
+                    raise IOError("Stahování bylo přerušeno")
+            os.replace(temporary_path, path)
+        finally:
+            if os.path.exists(temporary_path):
+                os.remove(temporary_path)
+
+    def run(self):
+        try:
+            os.makedirs(self.cache_dir, exist_ok=True)
+            if self.kind == "comets":
+                path = os.path.join(self.cache_dir, "CometEls.txt")
+                self.download_with_progress(
+                    COMET_ELEMENTS_URL, path, "Stahuji kometární elementy MPC"
+                )
+                count = len(SupplementCatalogReader.load_comets(path))
+                if count == 0:
+                    raise ValueError("Soubor neobsahuje žádné dráhy komet")
+                self.finished.emit(True, f"Staženo {count} kometárních drah z MPC.")
+                return
+            gz_path = os.path.join(self.cache_dir, "MPCORB.DAT.gz")
+            try:
+                self.download_with_progress(
+                    MPCORB_URL, gz_path, "Stahuji dráhy planetek MPCORB"
+                )
+                self.progress.emit(-1, "Vybírám planetky dosažitelné do 14 mag…")
+                count = SupplementCatalogReader.write_bright_mpcorb(
+                    gz_path,
+                    os.path.join(self.cache_dir, MPCORB_BRIGHT_FILE),
+                    ASTEROID_MAGNITUDE_LIMIT + ASTEROID_CATALOG_MARGIN,
+                )
+            finally:
+                if os.path.exists(gz_path):
+                    os.remove(gz_path)
+            self.finished.emit(
+                True, f"Staženo {count} drah planetek, které mohou dosáhnout 14 mag."
+            )
+        except Exception as error:
+            self.finished.emit(False, f"Stažení se nepodařilo: {error}")
 
 
 class SkyCoverageUpdater(QThread):
@@ -822,6 +1068,9 @@ class MainWindow(QMainWindow):
         self.selected_dir = os.path.join(app_dir, "skycov")
         self.planner_store = PlannerStore(os.path.join(app_dir, "planner_data.json"))
         self.planned_fields = []
+        # Snapshot of the fields as last saved to (or loaded from) the archive;
+        # used to warn before closing the window with an unsaved plan.
+        self.saved_plan_snapshot = self.plan_snapshot([])
         self.preview_fields = []
         self.preview_items = []
         self.mercator_center_ra = 180.0
@@ -838,12 +1087,30 @@ class MainWindow(QMainWindow):
         self.comet_elements = []
         self.comet_position_cache = None
         self.asteroid_elements = []
+        self.asteroid_arrays = None
         self.asteroid_position_cache = None
         self.milky_way_contours = []
         self.milky_way_envelope = None
         self.refreshing_planner_ui = False
         self.const_lines = self.load_constellation_lines()
         self.const_boundaries = self.load_constellation_boundaries()
+        # Katalogové geometrie se připraví jednou; redraw je jen promítá.
+        self.const_segment_cache = self.build_constellation_segments(
+            self.const_lines
+        )
+        self.const_boundary_cache = self.build_boundary_arrays(
+            self.const_boundaries
+        )
+        self.star_arrays = None
+        self.polygon_arrays = None
+        self.horizontal_rotation_cache = {}
+        self.planet_position_cache = None
+        self.kreutz_earth_cache = None
+        self.view_layer_items = []
+        self.render_state = None
+        self.sun_radec = None
+        self.last_cursor_radec = None
+        self.auto_range_pending = True
 
         central_widget = QWidget()
         central_widget.setObjectName("centralWidget")
@@ -944,9 +1211,23 @@ class MainWindow(QMainWindow):
         self.obs_combo.currentIndexChanged.connect(self.request_redraw)
         observing_controls.addWidget(self.obs_combo)
 
-        observing_controls.addWidget(QLabel("UTC:"))
+        observing_controls.addWidget(QLabel("Čas:"))
+        self.time_zone_combo = QComboBox()
+        self.time_zone_combo.addItems(TIME_ZONE_OFFSETS)
+        saved_time_zone = self.planner_store.data["settings"].get(
+            "time_zone", "UTC"
+        )
+        if saved_time_zone not in TIME_ZONE_OFFSETS:
+            saved_time_zone = "UTC"
+        self.time_zone_combo.setCurrentText(saved_time_zone)
+        self.time_zone_combo.setMinimumWidth(72)
+        self.time_zone_combo.setToolTip(
+            "Pásmo zobrazeného času: UTC, letní středoevropský čas "
+            "(SELČ, UTC+2), nebo středoevropský čas (SEČ, UTC+1)"
+        )
+        observing_controls.addWidget(self.time_zone_combo)
         self.time_edit = MinuteStepDateTimeEdit(QDateTime.currentDateTimeUtc())
-        self.time_edit.setTimeSpec(Qt.TimeSpec.UTC)
+        self.time_edit.setTimeZone(self.selected_time_zone(saved_time_zone))
         self.time_edit.setDisplayFormat("yyyy-MM-dd HH:mm")
         self.time_edit.setMinimumWidth(165)
         self.time_edit.setCurrentSection(QDateTimeEdit.Section.MinuteSection)
@@ -955,6 +1236,9 @@ class MainWindow(QMainWindow):
         )
         self.time_edit.dateTimeChanged.connect(self.request_redraw)
         observing_controls.addWidget(self.time_edit)
+        self.time_zone_combo.currentTextChanged.connect(
+            self.on_time_zone_changed
+        )
         observing_controls.addStretch()
 
         data_controls.addWidget(QLabel("Dny:"))
@@ -1110,10 +1394,11 @@ class MainWindow(QMainWindow):
         self.comets_check.stateChanged.connect(self.request_redraw)
         layer_controls.addWidget(self.comets_check)
 
-        self.asteroids_check = QCheckBox("Planetky ≤12m")
+        self.asteroids_check = QCheckBox("Planetky ≤14m")
         self.asteroids_check.setChecked(True)
         self.asteroids_check.setToolTip(
-            "Při větším přiblížení zobrazit jasné planetky s jejich číslem"
+            "Při větším přiblížení zobrazit planetky do 14 mag s číslem; "
+            "při detailním přiblížení také se jménem a jasností"
         )
         self.asteroids_check.setObjectName("warmCheck")
         self.asteroids_check.stateChanged.connect(self.request_redraw)
@@ -1352,7 +1637,21 @@ class MainWindow(QMainWindow):
         archive_layout.setContentsMargins(10, 8, 10, 8)
         self.archive_table = QTableWidget(0, 5)
         self.archive_table.setHorizontalHeaderLabels(["Zobrazit", "Plán", "Uloženo UTC", "Polí", "Sestava"])
-        self.archive_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        archive_header = self.archive_table.horizontalHeader()
+        archive_header.setMinimumSectionSize(44)
+        archive_header.setStretchLastSection(False)
+        archive_header.setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)
+        archive_header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        archive_header.setSectionResizeMode(2, QHeaderView.ResizeMode.Fixed)
+        archive_header.setSectionResizeMode(
+            3, QHeaderView.ResizeMode.ResizeToContents
+        )
+        archive_header.setSectionResizeMode(
+            4, QHeaderView.ResizeMode.ResizeToContents
+        )
+        self.archive_table.setColumnWidth(0, 88)
+        self.archive_table.setColumnWidth(2, 105)
+        self.archive_table.setWordWrap(False)
         self.archive_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.archive_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.archive_table.itemChanged.connect(self.archive_visibility_changed)
@@ -1377,18 +1676,66 @@ class MainWindow(QMainWindow):
         self.planner_tabs.addTab(archive_page, "Archiv")
 
         data_page = QWidget()
-        data_layout = QHBoxLayout(data_page)
-        data_layout.setContentsMargins(12, 12, 12, 12)
+        data_page_layout = QVBoxLayout(data_page)
+        data_page_layout.setContentsMargins(12, 12, 12, 12)
+        data_page_layout.setSpacing(14)
+        data_layout = QHBoxLayout()
         self.data_age_label = QLabel("Nejnovější MPC data: zjišťuji…")
         self.data_age_label.setObjectName("dataAgeLabel")
         self.data_age_label.setWordWrap(True)
-        data_layout.addWidget(self.data_age_label)
-        data_layout.addStretch()
+        data_layout.addWidget(self.data_age_label, 1)
         self.update_data_button = QPushButton("Aktualizovat")
         self.update_data_button.setObjectName("primaryButton")
         self.update_data_button.setToolTip("Stáhnout a ověřit aktuální data Sky Coverage z MPC")
         self.update_data_button.clicked.connect(self.update_skycoverage_data)
         data_layout.addWidget(self.update_data_button)
+        data_page_layout.addLayout(data_layout)
+
+        comet_layout = QHBoxLayout()
+        self.comet_data_label = QLabel("Komety: zjišťuji…")
+        self.comet_data_label.setObjectName("dataAgeLabel")
+        self.comet_data_label.setWordWrap(True)
+        comet_layout.addWidget(self.comet_data_label, 1)
+        self.download_comets_button = QPushButton("Stáhnout komety")
+        self.download_comets_button.setObjectName("primaryButton")
+        self.download_comets_button.setToolTip(
+            "Stáhnout aktuální elementy komet z MPC (CometEls.txt, asi 0,2 MB)"
+        )
+        self.download_comets_button.clicked.connect(
+            lambda: self.download_small_bodies("comets")
+        )
+        comet_layout.addWidget(self.download_comets_button)
+        data_page_layout.addLayout(comet_layout)
+
+        asteroid_layout = QHBoxLayout()
+        self.asteroid_data_label = QLabel("Planetky: zjišťuji…")
+        self.asteroid_data_label.setObjectName("dataAgeLabel")
+        self.asteroid_data_label.setWordWrap(True)
+        asteroid_layout.addWidget(self.asteroid_data_label, 1)
+        self.download_asteroids_button = QPushButton("Stáhnout planetky")
+        self.download_asteroids_button.setObjectName("primaryButton")
+        self.download_asteroids_button.setToolTip(
+            "Stáhnout dráhy planetek MPCORB z MPC (velký soubor, desítky MB) "
+            "a ponechat jen planetky, které mohou dosáhnout 14 mag"
+        )
+        self.download_asteroids_button.clicked.connect(
+            lambda: self.download_small_bodies("asteroids")
+        )
+        asteroid_layout.addWidget(self.download_asteroids_button)
+        data_page_layout.addLayout(asteroid_layout)
+
+        self.small_body_progress = QProgressBar()
+        self.small_body_progress.setRange(0, 100)
+        self.small_body_progress.setTextVisible(True)
+        self.small_body_progress.setFormat("%p %")
+        self.small_body_progress.setVisible(False)
+        data_page_layout.addWidget(self.small_body_progress)
+        self.small_body_progress_label = QLabel("")
+        self.small_body_progress_label.setWordWrap(True)
+        self.small_body_progress_label.setVisible(False)
+        data_page_layout.addWidget(self.small_body_progress_label)
+        data_page_layout.addStretch()
+        self.small_body_downloader = None
         self.planner_tabs.addTab(data_page, "Data MPC")
 
         # Plot
@@ -1403,7 +1750,13 @@ class MainWindow(QMainWindow):
             axis.setPen(pg.mkPen((70, 89, 118, 180), width=1))
             axis.setTextPen(pg.mkPen((142, 158, 184, 220)))
             axis.setTickFont(axis_font)
-        self.plot_widget.scene().sigMouseMoved.connect(self.on_mouse_move)
+        # Souřadnice pod kurzorem se počítají nejvýš ~60× za sekundu; během
+        # tažení mapy se neaktualizují vůbec, aby posun nebrzdily výpočty.
+        self.mouse_move_proxy = pg.SignalProxy(
+            self.plot_widget.scene().sigMouseMoved,
+            rateLimit=60,
+            slot=lambda event: self.on_mouse_move(event[0]),
+        )
         self.plot_widget.scene().sigMouseClicked.connect(self.on_map_click)
         self.map_workspace_layout.addWidget(self.plot_widget)
 
@@ -1432,7 +1785,7 @@ class MainWindow(QMainWindow):
         self.axis_tick_timer.timeout.connect(self.update_axis_ticks)
         self.bayer_label_timer = QTimer(self)
         self.bayer_label_timer.setSingleShot(True)
-        self.bayer_label_timer.timeout.connect(self.refresh_bayer_labels)
+        self.bayer_label_timer.timeout.connect(self.refresh_view_layers)
         self.mer_pan_timer = QTimer(self)
         self.mer_pan_timer.setSingleShot(True)
         self.mer_pan_timer.timeout.connect(self.refresh_mercator_view)
@@ -1448,8 +1801,7 @@ class MainWindow(QMainWindow):
 
         self.days_spin.valueChanged.connect(self.request_data_reload)
         self.mag_spin.valueChanged.connect(self.request_redraw)
-        self.obs_combo.currentIndexChanged.connect(self.request_redraw)
-        self.time_edit.dateTimeChanged.connect(self.request_redraw)
+        # obs_combo i time_edit už jsou na request_redraw napojené výše.
         self.time_edit.dateTimeChanged.connect(self.request_data_reload)
         self.filter_edit.textChanged.connect(self.refresh_exposure_script)
         self.exposure_spin.valueChanged.connect(self.refresh_exposure_script)
@@ -1462,12 +1814,8 @@ class MainWindow(QMainWindow):
         self.star_reader.finished.connect(self.on_stars_loaded)
         self.star_reader.progress.connect(self.status_label.setText)
         self.star_reader.start()
-        self.supplement_reader = SupplementCatalogReader(
-            os.path.dirname(star_cache), self.time_edit.date().year()
-        )
-        self.supplement_reader.finished.connect(self.on_supplement_catalogs_loaded)
-        self.supplement_reader.progress.connect(self.status_label.setText)
-        self.supplement_reader.start()
+        self.catalog_cache_dir = os.path.dirname(star_cache)
+        self.load_supplement_catalogs()
         self.set_default_mer_range()
         self.update_axis_ticks()
         self.start_processing()
@@ -1638,6 +1986,24 @@ class MainWindow(QMainWindow):
                 color: #59677b;
                 background-color: #111a2a;
                 border-color: #1e2a3d;
+            }
+            QPushButton#primaryButton:disabled {
+                color: #59677b;
+                background-color: #111a2a;
+                border-color: #1e2a3d;
+            }
+            QProgressBar {
+                color: #dbe7f5;
+                background-color: #111b2d;
+                border: 1px solid #2a3b57;
+                border-radius: 6px;
+                min-height: 18px;
+                text-align: center;
+                font-weight: 600;
+            }
+            QProgressBar::chunk {
+                background-color: #3fb7a0;
+                border-radius: 5px;
             }
             QCheckBox {
                 color: #b9c7d9;
@@ -1848,15 +2214,61 @@ class MainWindow(QMainWindow):
         self.planner_store.save()
         self.refresh_equipment_ui()
 
-    def map_position_to_icrs(self, x, y):
-        qdt = self.time_edit.dateTime().toPyDateTime()
-        frame_altaz = AltAz(
-            obstime=Time(qdt), location=OBSERVATORIES[self.obs_combo.currentText()]
+    def map_time(self):
+        """Return the map instant as astropy UTC time, independent of display zone."""
+        return qdatetime_to_time(self.time_edit.dateTime())
+
+    def map_frame(self, eval_time=None):
+        """Return the AltAz frame for the map time and selected observatory."""
+        return AltAz(
+            obstime=self.map_time() if eval_time is None else eval_time,
+            location=OBSERVATORIES[self.obs_combo.currentText()],
         )
+
+    def horizontal_rotation(self, frame_altaz):
+        """Return the cached 3×3 rotation ICRS → AltAz for one time and site.
+
+        One astropy transformation of a fixed set of directions is fitted by a
+        rotation matrix.  Each later conversion is then a plain matrix product
+        (microseconds instead of ~7 ms per astropy call).  The neglected
+        direction-dependent aberration is below 0.01°, far under the map's
+        drawing resolution.  Topocentric bodies (Moon, planets) still use
+        astropy so the Moon's parallax is kept.
+        """
+        obstime = frame_altaz.obstime
+        location = frame_altaz.location
+        key = (
+            float(obstime.jd1), float(obstime.jd2),
+            float(location.x.value), float(location.y.value),
+            float(location.z.value),
+        )
+        matrix = self.horizontal_rotation_cache.get(key)
+        if matrix is not None:
+            return matrix
+        longitude = np.array([0, 60, 120, 180, 240, 300, 30, 150, 270, 90, 210, 330, 0, 0], float)
+        latitude = np.array([0, 0, 0, 0, 0, 0, 55, 55, 55, -55, -55, -55, 89, -89], float)
+        horizontal = SkyCoord(
+            ra=longitude * u.deg, dec=latitude * u.deg, frame="icrs"
+        ).transform_to(frame_altaz)
+        matrix = fit_rotation(
+            unit_vectors(longitude, latitude),
+            unit_vectors(horizontal.az.deg, horizontal.alt.deg),
+        )
+        if len(self.horizontal_rotation_cache) > 32:
+            self.horizontal_rotation_cache.clear()
+        self.horizontal_rotation_cache[key] = matrix
+        return matrix
+
+    def horizontal_to_icrs(self, azimuth, altitude, frame_altaz):
+        matrix = self.horizontal_rotation(frame_altaz)
+        return rotate_angles(matrix.T, azimuth, altitude)
+
+    def map_position_to_radec(self, x, y, frame_altaz=None):
+        """Return ``(ra, dec, azimuth_or_None, altitude_or_None)`` or ``None``."""
+        projection = self.projection_combo.currentIndex()
+        if projection == 1 and x ** 2 / 8.0 + y ** 2 / 2.0 > 1.0:
+            return None
         if self.view_mode_combo.currentIndex() == 1:
-            projection = self.projection_combo.currentIndex()
-            if projection == 1 and x ** 2 / 8.0 + y ** 2 / 2.0 > 1.0:
-                return None
             local_x, altitude = self.inverse_local(x, y)
             if projection == 1:
                 azimuth = (local_x + (self.local_sun_azimuth or 0)) % 360
@@ -1865,15 +2277,20 @@ class MainWindow(QMainWindow):
             azimuth, altitude = float(np.asarray(azimuth)), float(np.asarray(altitude))
             if not np.isfinite(azimuth) or not np.isfinite(altitude) or not -90 <= altitude <= 90:
                 return None
-            return SkyCoord(az=azimuth * u.deg, alt=altitude * u.deg,
-                            frame=frame_altaz).transform_to("icrs")
-        if self.projection_combo.currentIndex() == 1 and x ** 2 / 8.0 + y ** 2 / 2.0 > 1.0:
-            return None
+            frame_altaz = frame_altaz or self.map_frame()
+            ra, dec = self.horizontal_to_icrs(azimuth, altitude, frame_altaz)
+            return float(ra), float(dec), azimuth, altitude
         ra, dec = self.inverse_global(x, y)
         ra, dec = float(np.asarray(ra)), float(np.asarray(dec))
         if not np.isfinite(ra) or not np.isfinite(dec) or not -90 <= dec <= 90:
             return None
-        return SkyCoord(ra=ra * u.deg, dec=dec * u.deg, frame="icrs")
+        return ra % 360.0, dec, None, None
+
+    def map_position_to_icrs(self, x, y):
+        position = self.map_position_to_radec(x, y)
+        if position is None:
+            return None
+        return SkyCoord(ra=position[0] * u.deg, dec=position[1] * u.deg, frame="icrs")
 
     def on_mosaic_orientation_changed(self, index):
         if index == 0:
@@ -1888,85 +2305,97 @@ class MainWindow(QMainWindow):
         self.clear_field_preview()
 
     @staticmethod
-    def horizon_offset_coordinate(origin_altaz, horizontal_deg, vertical_deg):
+    def horizon_offset_angles(origin_azimuth, origin_altitude,
+                              horizontal_deg, vertical_deg):
         """Offset in local horizon axes while keeping a row at constant altitude."""
-        altitude = float(origin_altaz.alt.deg) + float(vertical_deg)
-        altitude = float(np.clip(altitude, -89.8, 89.8))
-        cos_altitude = max(0.03, abs(math.cos(math.radians(altitude))))
-        azimuth = (float(origin_altaz.az.deg) + float(horizontal_deg) / cos_altitude) % 360.0
-        return SkyCoord(az=azimuth * u.deg, alt=altitude * u.deg,
-                        frame=origin_altaz.frame)
-
-    def eq_camera_angle_to_horizon(self, coordinate, profile, frame_altaz):
-        """Return sensor X-axis angle from the local horizontal direction."""
-        east, north = rotated_offset(0.05, 0.0, float(profile["rotation_deg"]))
-        endpoint_ra, endpoint_dec = offset_coordinate(
-            float(coordinate.icrs.ra.deg), float(coordinate.icrs.dec.deg), east, north
+        altitude = np.clip(
+            float(origin_altitude) + np.asarray(vertical_deg, dtype=float),
+            -89.8, 89.8,
         )
-        centre = coordinate.transform_to(frame_altaz)
-        endpoint = SkyCoord(
-            ra=endpoint_ra * u.deg, dec=endpoint_dec * u.deg, frame="icrs"
-        ).transform_to(frame_altaz)
-        delta_azimuth = (
-            float(endpoint.az.deg) - float(centre.az.deg) + 180.0
-        ) % 360.0 - 180.0
-        horizontal = delta_azimuth * math.cos(math.radians(float(centre.alt.deg)))
-        vertical = float(endpoint.alt.deg) - float(centre.alt.deg)
-        return math.degrees(math.atan2(vertical, horizontal))
+        cos_altitude = np.maximum(0.03, np.abs(np.cos(np.radians(altitude))))
+        azimuth = (
+            float(origin_azimuth) + np.asarray(horizontal_deg, dtype=float) / cos_altitude
+        ) % 360.0
+        return azimuth, altitude
+
+    def eq_camera_angles_to_horizon(self, ra, dec, profile, frame_altaz):
+        """Return sensor X-axis angles from the local horizontal direction."""
+        matrix = self.horizontal_rotation(frame_altaz)
+        ra = np.atleast_1d(np.asarray(ra, dtype=float))
+        dec = np.atleast_1d(np.asarray(dec, dtype=float))
+        east, north = rotated_offset(0.05, 0.0, float(profile["rotation_deg"]))
+        endpoint_ra, endpoint_dec = offset_coordinates(ra, dec, east, north)
+        centre_az, centre_alt = rotate_angles(matrix, ra, dec)
+        endpoint_az, endpoint_alt = rotate_angles(matrix, endpoint_ra, endpoint_dec)
+        delta_azimuth = (endpoint_az - centre_az + 180.0) % 360.0 - 180.0
+        horizontal = delta_azimuth * np.cos(np.radians(centre_alt))
+        vertical = endpoint_alt - centre_alt
+        return np.degrees(np.arctan2(vertical, horizontal))
 
     def make_planner_mosaic(self, coordinate, frame_altaz):
+        """Build a mosaic around ``coordinate`` (SkyCoord or ``(ra, dec)``)."""
+        if isinstance(coordinate, SkyCoord):
+            centre_ra = float(coordinate.icrs.ra.deg)
+            centre_dec = float(coordinate.icrs.dec.deg)
+        else:
+            centre_ra, centre_dec = float(coordinate[0]), float(coordinate[1])
         profile = self.current_profile()
         rows = self.mosaic_rows_spin.value()
         columns = self.mosaic_columns_spin.value()
         overlap = self.mosaic_overlap_spin.value()
         if self.mosaic_orientation_combo.currentIndex() == 1:
-            return make_mosaic(
-                float(coordinate.icrs.ra.deg), float(coordinate.icrs.dec.deg), profile,
-                rows, columns, overlap,
-            )
+            return make_mosaic(centre_ra, centre_dec, profile, rows, columns, overlap)
 
-        origin_altaz = coordinate.transform_to(frame_altaz)
+        matrix = self.horizontal_rotation(frame_altaz)
+        origin_az, origin_alt = rotate_angles(matrix, centre_ra, centre_dec)
+        origin_az, origin_alt = float(origin_az), float(origin_alt)
         width = float(profile["width_deg"])
         height = float(profile["height_deg"])
-        centre_angle = self.eq_camera_angle_to_horizon(coordinate, profile, frame_altaz)
+        centre_angle = float(self.eq_camera_angles_to_horizon(
+            centre_ra, centre_dec, profile, frame_altaz
+        )[0])
         horizontal_step, vertical_step = safe_horizon_grid_steps(
             width, height, centre_angle, overlap
         )
 
         # A wide mosaic sees a changing parallactic angle.  Sample the full
         # footprint and use the smallest safe spacing found there.
+        row_factor = (rows - 1) / 2.0 - np.repeat(np.arange(rows), columns)
+        column_factor = np.tile(np.arange(columns), rows) - (columns - 1) / 2.0
         for _ in range(2):
+            sample_az, sample_alt = self.horizon_offset_angles(
+                origin_az, origin_alt,
+                column_factor * horizontal_step, row_factor * vertical_step,
+            )
+            sample_ra, sample_dec = rotate_angles(matrix.T, sample_az, sample_alt)
+            angles = self.eq_camera_angles_to_horizon(
+                sample_ra, sample_dec, profile, frame_altaz
+            )
             sampled_horizontal = [horizontal_step]
             sampled_vertical = [vertical_step]
-            for row_index in range(rows):
-                y = ((rows - 1) / 2.0 - row_index) * vertical_step
-                for column_index in range(columns):
-                    x = (column_index - (columns - 1) / 2.0) * horizontal_step
-                    sample = self.horizon_offset_coordinate(origin_altaz, x, y).transform_to("icrs")
-                    angle = self.eq_camera_angle_to_horizon(sample, profile, frame_altaz)
-                    step_x, step_y = safe_horizon_grid_steps(width, height, angle, overlap)
-                    sampled_horizontal.append(step_x)
-                    sampled_vertical.append(step_y)
+            for angle in angles:
+                step_x, step_y = safe_horizon_grid_steps(width, height, float(angle), overlap)
+                sampled_horizontal.append(step_x)
+                sampled_vertical.append(step_y)
             horizontal_step = min(sampled_horizontal)
             vertical_step = min(sampled_vertical)
 
+        field_az, field_alt = self.horizon_offset_angles(
+            origin_az, origin_alt,
+            column_factor * horizontal_step, row_factor * vertical_step,
+        )
+        field_ra, field_dec = rotate_angles(matrix.T, field_az, field_alt)
         result = []
-        for row_index in range(rows):
-            y = ((rows - 1) / 2.0 - row_index) * vertical_step
-            for column_index in range(columns):
-                x = (column_index - (columns - 1) / 2.0) * horizontal_step
-                field_coordinate = self.horizon_offset_coordinate(
-                    origin_altaz, x, y
-                ).transform_to("icrs")
-                result.append({
-                    "ra_deg": float(field_coordinate.ra.deg),
-                    "dec_deg": float(field_coordinate.dec.deg),
-                    "profile": dict(profile),
-                    "mosaic_orientation": "horizon_eq",
-                    "requested_overlap_percent": float(overlap),
-                    "horizontal_step_deg": float(horizontal_step),
-                    "vertical_step_deg": float(vertical_step),
-                })
+        for field_index in range(rows * columns):
+            result.append({
+                "ra_deg": float(field_ra[field_index]),
+                "dec_deg": float(field_dec[field_index]),
+                "profile": dict(profile),
+                "mosaic_orientation": "horizon_eq",
+                "requested_overlap_percent": float(overlap),
+                "horizontal_step_deg": float(horizontal_step),
+                "vertical_step_deg": float(vertical_step),
+            })
         return result
 
     def on_map_click(self, event):
@@ -1978,15 +2407,12 @@ class MainWindow(QMainWindow):
         if not view_box.sceneBoundingRect().contains(event.scenePos()):
             return
         point = view_box.mapSceneToView(event.scenePos())
-        coordinate = self.map_position_to_icrs(point.x(), point.y())
-        if coordinate is None:
+        frame_altaz = self.map_frame()
+        position = self.map_position_to_radec(point.x(), point.y(), frame_altaz)
+        if position is None:
             self.status_label.setText("Pole nelze umístit mimo platnou oblast projekce.")
             return
-        qdt = self.time_edit.dateTime().toPyDateTime()
-        frame_altaz = AltAz(
-            obstime=Time(qdt), location=OBSERVATORIES[self.obs_combo.currentText()]
-        )
-        new_fields = self.make_planner_mosaic(coordinate, frame_altaz)
+        new_fields = self.make_planner_mosaic(position[:2], frame_altaz)
         self.planned_fields.extend(new_fields)
         self.refresh_plan_table()
         self.redraw()
@@ -2018,28 +2444,10 @@ class MainWindow(QMainWindow):
     def update_field_preview(self, coordinate, frame_altaz, is_local):
         self.clear_field_preview()
         self.preview_fields = self.make_planner_mosaic(coordinate, frame_altaz)
-        line_x, line_y = [], []
-        for field in self.preview_fields:
-            vertices = field_outline(field)
-            ra = np.asarray([point[0] for point in vertices])
-            dec = np.asarray([point[1] for point in vertices])
-            if is_local:
-                azimuth, altitude = self.transform_coords(ra, dec, frame_altaz)
-                px, py = self.project_local(self.local_azimuth(azimuth), altitude)
-            else:
-                px, py = self.project_global(ra, dec)
-            for edge_index in range(len(px) - 1):
-                values = (px[edge_index], py[edge_index], px[edge_index + 1], py[edge_index + 1])
-                if not all(np.isfinite(value) for value in values):
-                    continue
-                if self.projection_combo.currentIndex() in (1, 3, 4):
-                    append_projected_segment(
-                        line_x, line_y, *values,
-                        max_step=self.projected_segment_limit(0.8),
-                    )
-                else:
-                    append_sky_segment(line_x, line_y, *values)
-        if line_x:
+        line_x, line_y = self.project_field_outlines(
+            self.preview_fields, frame_altaz, is_local
+        )
+        if len(line_x):
             preview = pg.PlotCurveItem(
                 x=np.asarray(line_x), y=np.asarray(line_y), connect="finite",
                 pen=pg.mkPen(
@@ -2104,7 +2512,7 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "Archiv polí", "Nejprve přidejte pole do mapy.")
             return
         qdt = self.time_edit.dateTime().toPyDateTime()
-        eval_time = Time(qdt)
+        eval_time = self.map_time()
         location = OBSERVATORIES[self.obs_combo.currentText()]
         before_time = eval_time - 5 * u.min
         after_time = eval_time + 5 * u.min
@@ -2145,7 +2553,10 @@ class MainWindow(QMainWindow):
             name.strip(), self.planned_fields, self.filter_edit.text(),
             self.exposure_spin.value(), self.loops_spin.value(),
         )
-        observation_time = qdt.strftime("%Y-%m-%d %H:%M")
+        # Export uvádí „Čas mapy (UTC)“, proto vždy skutečný UTC čas.
+        observation_time = qdatetime_to_utc(
+            self.time_edit.dateTime()
+        ).strftime("%Y-%m-%d %H:%M")
         try:
             text_path = export_plan_text(
                 os.path.join(self.app_dir, "observation_plans"), archive,
@@ -2164,11 +2575,56 @@ class MainWindow(QMainWindow):
             return
         self.planner_store.data["archives"].append(archive)
         self.planner_store.save()
+        self.saved_plan_snapshot = self.plan_snapshot(self.planned_fields)
         self.refresh_archive_table()
         self.redraw()
         self.status_label.setText(
             f"Plán „{name.strip()}“ byl uložen do archivu i do {text_path}."
         )
+
+    @staticmethod
+    def plan_snapshot(fields):
+        """Return a stable text form of planned fields for change detection."""
+        return json.dumps(fields, sort_keys=True, ensure_ascii=False)
+
+    def has_unsaved_plan(self):
+        return bool(self.planned_fields) and (
+            self.plan_snapshot(self.planned_fields) != self.saved_plan_snapshot
+        )
+
+    def closeEvent(self, event):
+        """Ask before closing when the planned fields were not saved."""
+        if not self.has_unsaved_plan():
+            event.accept()
+            return
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Warning)
+        box.setWindowTitle("Neuložený plán")
+        box.setText(
+            f"Plán obsahuje {len(self.planned_fields)} polí, která nejsou "
+            "uložená v archivu."
+        )
+        box.setInformativeText("Chcete plán před zavřením uložit?")
+        save_button = box.addButton("Uložit plán…", QMessageBox.ButtonRole.AcceptRole)
+        discard_button = box.addButton(
+            "Zavřít bez uložení", QMessageBox.ButtonRole.DestructiveRole
+        )
+        cancel_button = box.addButton("Zrušit", QMessageBox.ButtonRole.RejectRole)
+        box.setDefaultButton(save_button)
+        box.setEscapeButton(cancel_button)
+        box.exec()
+        clicked = box.clickedButton()
+        if clicked is discard_button:
+            event.accept()
+        elif clicked is save_button:
+            self.archive_current_plan()
+            if self.has_unsaved_plan():
+                # Saving was cancelled or failed: keep the window open.
+                event.ignore()
+            else:
+                event.accept()
+        else:
+            event.ignore()
 
     def refresh_archive_table(self):
         self.refreshing_planner_ui = True
@@ -2179,12 +2635,25 @@ class MainWindow(QMainWindow):
             visible_item.setFlags(visible_item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
             visible_item.setCheckState(Qt.CheckState.Checked if archive.get("visible", True)
                                        else Qt.CheckState.Unchecked)
+            visible_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            visible_item.setToolTip("Zobrazit tento plán v mapě")
             self.archive_table.setItem(row, 0, visible_item)
             profiles = sorted({field.get("profile", {}).get("name", "?") for field in archive.get("fields", [])})
-            values = [archive.get("name", "Bez názvu"), archive.get("created_utc", ""),
-                      str(len(archive.get("fields", []))), ", ".join(profiles)]
-            for column, value in enumerate(values, start=1):
-                self.archive_table.setItem(row, column, QTableWidgetItem(value))
+            plan_name = str(archive.get("name", "Bez názvu"))
+            created_utc = str(archive.get("created_utc", ""))
+            profile_names = ", ".join(profiles)
+            values = [
+                (plan_name, plan_name),
+                (format_archive_timestamp(created_utc), created_utc),
+                (str(len(archive.get("fields", []))), "Počet polí v plánu"),
+                (profile_names, profile_names),
+            ]
+            for column, (value, tooltip) in enumerate(values, start=1):
+                item = QTableWidgetItem(value)
+                item.setToolTip(tooltip or value)
+                if column in (2, 3):
+                    item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                self.archive_table.setItem(row, column, item)
         self.refreshing_planner_ui = False
 
     def archive_visibility_changed(self, item):
@@ -2208,6 +2677,7 @@ class MainWindow(QMainWindow):
             return
         archive = self.planner_store.data["archives"][index]
         self.planned_fields = json.loads(json.dumps(archive.get("fields", [])))
+        self.saved_plan_snapshot = self.plan_snapshot(self.planned_fields)
         self.filter_edit.setText(str(archive.get("filter", "N")))
         self.exposure_spin.setValue(float(archive.get("exposure_seconds", 30)))
         self.loops_spin.setValue(int(archive.get("loops", 15)))
@@ -2247,19 +2717,12 @@ class MainWindow(QMainWindow):
             self.status_label.setText("V archivu není zapnutý žádný plán.")
             return
 
-        qdt = self.time_edit.dateTime().toPyDateTime()
-        eval_time = Time(qdt)
-        frame_altaz = AltAz(
-            obstime=eval_time,
-            location=OBSERVATORIES[self.obs_combo.currentText()],
-        )
+        frame_altaz = self.map_frame()
         is_local = self.view_mode_combo.currentIndex() == 1
         projected_x, projected_y = [], []
         for field in fields:
             try:
-                vertices = field_outline(field)
-                ra = np.asarray([point[0] for point in vertices])
-                dec = np.asarray([point[1] for point in vertices])
+                ra, dec = field_outline_arrays(field)
                 if is_local:
                     azimuth, altitude = self.transform_coords(ra, dec, frame_altaz)
                     px, py = self.project_local(
@@ -2294,6 +2757,85 @@ class MainWindow(QMainWindow):
             f"Mapa zahrnuje {plan_count} zapnuté plány ({len(fields)} polí)."
         )
 
+    def load_supplement_catalogs(self):
+        """(Re)load DSO, Milky Way and the locally stored small-body orbits."""
+        self.supplement_reader = SupplementCatalogReader(
+            self.catalog_cache_dir, self.time_edit.date().year()
+        )
+        self.supplement_reader.finished.connect(self.on_supplement_catalogs_loaded)
+        self.supplement_reader.progress.connect(self.status_label.setText)
+        self.supplement_reader.start()
+
+    @staticmethod
+    def file_age_text(path):
+        modified = datetime.fromtimestamp(os.path.getmtime(path))
+        age_days = max(0, (datetime.now().date() - modified.date()).days)
+        return f"{modified:%Y-%m-%d} (stáří {age_days} dní)"
+
+    def refresh_small_body_status(self):
+        """Describe the stored comet and asteroid files on the Data MPC tab."""
+        cache_dir = self.catalog_cache_dir
+        comet_path = os.path.join(cache_dir, "CometEls.txt")
+        if os.path.exists(comet_path):
+            self.comet_data_label.setText(
+                f"Komety: {len(self.comet_elements)} drah, staženo "
+                f"{self.file_age_text(comet_path)}"
+            )
+        else:
+            self.comet_data_label.setText("Komety: nejsou stažené")
+        mpcorb_path = os.path.join(cache_dir, MPCORB_BRIGHT_FILE)
+        bright_path = os.path.join(
+            cache_dir, f"Soft00Bright-{self.time_edit.date().year()}.txt"
+        )
+        if os.path.exists(mpcorb_path):
+            self.asteroid_data_label.setText(
+                f"Planetky: {len(self.asteroid_elements)} drah do 14 mag "
+                f"(MPCORB), staženo {self.file_age_text(mpcorb_path)}"
+            )
+        elif os.path.exists(bright_path):
+            self.asteroid_data_label.setText(
+                "Planetky: jen roční seznam jasných planetek MPC "
+                f"({len(self.asteroid_elements)} drah, asi do 12 mag). "
+                "Pro 14 mag stáhněte MPCORB."
+            )
+        else:
+            self.asteroid_data_label.setText("Planetky: nejsou stažené")
+
+    def download_small_bodies(self, kind):
+        if self.small_body_downloader is not None and self.small_body_downloader.isRunning():
+            return
+        self.download_comets_button.setEnabled(False)
+        self.download_asteroids_button.setEnabled(False)
+        self.small_body_progress.setRange(0, 100)
+        self.small_body_progress.setValue(0)
+        self.small_body_progress.setVisible(True)
+        self.small_body_progress_label.setText("Připojuji se k MPC…")
+        self.small_body_progress_label.setVisible(True)
+        self.small_body_downloader = SmallBodyDownloader(self.catalog_cache_dir, kind)
+        self.small_body_downloader.progress.connect(self.on_small_body_progress)
+        self.small_body_downloader.finished.connect(self.on_small_body_downloaded)
+        self.small_body_downloader.start()
+
+    def on_small_body_progress(self, percent, text):
+        if percent < 0:
+            # Unknown size or post-processing: show a busy indicator.
+            self.small_body_progress.setRange(0, 0)
+        else:
+            self.small_body_progress.setRange(0, 100)
+            self.small_body_progress.setValue(percent)
+        self.small_body_progress_label.setText(text)
+
+    def on_small_body_downloaded(self, successful, message):
+        self.download_comets_button.setEnabled(True)
+        self.download_asteroids_button.setEnabled(True)
+        self.small_body_progress.setVisible(False)
+        self.small_body_progress_label.setText(message)
+        self.status_label.setText(message)
+        if successful:
+            self.load_supplement_catalogs()
+        else:
+            QMessageBox.warning(self, "Stažení z MPC", message)
+
     def update_skycoverage_data(self):
         self.update_data_button.setEnabled(False)
         self.btn_load.setEnabled(False)
@@ -2313,60 +2855,52 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Aktualizace MPC", message)
 
     def set_twilight(self, target_alt_deg, evening=True):
-        """Nastaví dnešní večerní nebo následující ranní soumrak v UTC."""
+        """Nastaví nejbližší budoucí večerní nebo ranní soumrak v UTC."""
         obs_location = OBSERVATORIES[self.obs_combo.currentText()]
-
-        base_date = datetime.now(timezone.utc).replace(
-            hour=0, minute=0, second=0, microsecond=0
+        best_dt, sun_azimuth = next_twilight_crossing(
+            obs_location, target_alt_deg, evening
         )
-        if evening:
-            search_date = base_date
-            start_hour, end_hour = 12, 30
-        else:
-            search_date = base_date + timedelta(days=1)
-            start_hour, end_hour = 0, 18
-        times = [search_date + timedelta(minutes=m) for m in range(start_hour * 60, end_hour * 60 + 1)]
-
-        astropy_times = Time(times)
-        frame = AltAz(obstime=astropy_times, location=obs_location)
-        suns = get_sun(astropy_times).transform_to(frame)
-        alts = suns.alt.deg
-
-        if evening:
-            crossings = np.where(
-                (alts[:-1] > target_alt_deg) & (alts[1:] <= target_alt_deg)
-            )[0]
-        else:
-            crossings = np.where(
-                (alts[:-1] < target_alt_deg) & (alts[1:] >= target_alt_deg)
-            )[0]
-
-        if len(crossings):
-            best_idx = int(crossings[0])
-            if abs(alts[best_idx + 1] - target_alt_deg) < abs(alts[best_idx] - target_alt_deg):
-                best_idx += 1
-            best_dt = times[best_idx]
-        else:
-            best_idx = int(np.argmin(np.abs(alts - target_alt_deg)))
-            best_dt = times[best_idx]
-        best_dt = best_dt.replace(tzinfo=timezone.utc)
 
         self.time_edit.blockSignals(True)
         self.time_edit.setDateTime(
-            QDateTime.fromSecsSinceEpoch(int(best_dt.timestamp()), Qt.TimeSpec.UTC)
+            QDateTime.fromSecsSinceEpoch(
+                int(best_dt.timestamp()), self.selected_time_zone()
+            )
         )
         self.time_edit.blockSignals(False)
         self.view_mode_combo.setCurrentIndex(1)
         self.projection_combo.setCurrentIndex(4)
-        self.local_mercator_center_azimuth = float(suns[best_idx].az.deg)
+        self.local_mercator_center_azimuth = sun_azimuth
         self.local_mercator_center_altitude = 35.0
         self.local_mercator_observatory = self.obs_combo.currentText()
-        self.local_sun_azimuth = float(suns[best_idx].az.deg)
+        self.local_sun_azimuth = sun_azimuth
         self.mercator_center_azimuth = 180.0
         self.mercator_center_altitude = 35.0
         self.set_default_mer_range()
         self.redraw()
         self.request_data_reload()
+
+    def selected_time_zone(self, name=None):
+        """Return the fixed-offset zone selected for displaying map time."""
+        if name is None:
+            name = self.time_zone_combo.currentText()
+        offset = TIME_ZONE_OFFSETS.get(name, 0)
+        return QTimeZone.fromSecondsAheadOfUtc(offset)
+
+    def on_time_zone_changed(self, name):
+        """Change only the displayed zone while retaining the same instant."""
+        epoch_seconds = self.time_edit.dateTime().toSecsSinceEpoch()
+        zone = self.selected_time_zone(name)
+        self.time_edit.blockSignals(True)
+        self.time_edit.setTimeZone(zone)
+        self.time_edit.setDateTime(
+            QDateTime.fromSecsSinceEpoch(epoch_seconds, zone)
+        )
+        self.time_edit.blockSignals(False)
+        self.planner_store.data["settings"]["time_zone"] = (
+            name if name in TIME_ZONE_OFFSETS else "UTC"
+        )
+        self.planner_store.save()
 
     def shift_time(self, minutes):
         self.time_edit.setDateTime(
@@ -2409,11 +2943,9 @@ class MainWindow(QMainWindow):
         coordinate = coordinate.transform_to("icrs")
         self.mercator_center_ra = float(coordinate.ra.deg)
         self.mercator_center_dec = float(coordinate.dec.deg)
-        qdt = self.time_edit.dateTime().toPyDateTime()
-        frame_altaz = AltAz(
-            obstime=Time(qdt), location=OBSERVATORIES[self.obs_combo.currentText()]
-        )
-        sun_altaz = get_sun(Time(qdt)).transform_to(frame_altaz)
+        eval_time = self.map_time()
+        frame_altaz = self.map_frame(eval_time)
+        sun_altaz = get_sun(eval_time).transform_to(frame_altaz)
         center_altaz = coordinate.transform_to(frame_altaz)
         self.mercator_center_azimuth = (
             float(center_altaz.az.deg) - float(sun_altaz.az.deg) + 180.0
@@ -2423,6 +2955,7 @@ class MainWindow(QMainWindow):
     def on_view_change(self):
         is_local = self.view_mode_combo.currentIndex() == 1
         projection = self.projection_combo.currentIndex()
+        self.auto_range_pending = True
         self.plot_widget.clear()
         self.plot_widget.getViewBox().setAspectLocked(True, ratio=1.0)
         if is_local:
@@ -2474,10 +3007,13 @@ class MainWindow(QMainWindow):
 
     def on_projection_change(self, index=None):
         if self.projection_combo.currentIndex() == 4:
-            if self.last_cursor_icrs is not None:
-                self.set_mercator_center(self.last_cursor_icrs)
+            if self.last_cursor_radec is not None:
+                self.set_mercator_center(SkyCoord(
+                    ra=self.last_cursor_radec[0] * u.deg,
+                    dec=self.last_cursor_radec[1] * u.deg, frame="icrs",
+                ))
             else:
-                self.set_mercator_center(get_sun(Time(self.time_edit.dateTime().toPyDateTime())))
+                self.set_mercator_center(get_sun(self.map_time()))
         self.on_view_change()
 
     def update_axis_ticks(self):
@@ -2589,67 +3125,50 @@ class MainWindow(QMainWindow):
         ])
 
     def on_mouse_move(self, pos):
+        if QApplication.mouseButtons() != Qt.MouseButton.NoButton:
+            # Během tažení mapy nic nepočítáme; plynulost posunu má přednost.
+            return
         view_box = self.plot_widget.plotItem.vb
         if not view_box.sceneBoundingRect().contains(pos):
             return
         mouse_point = view_box.mapSceneToView(pos)
-        x, y = mouse_point.x(), mouse_point.y()
-        qdt = self.time_edit.dateTime().toPyDateTime()
-        eval_time = Time(qdt)
-        location = OBSERVATORIES[self.obs_combo.currentText()]
-        frame_altaz = AltAz(obstime=eval_time, location=location)
-        if self.view_mode_combo.currentIndex() == 1:
-            projection = self.projection_combo.currentIndex()
-            if projection == 1:
-                if x ** 2 / 8.0 + y ** 2 / 2.0 > 1.0:
-                    self.show_invalid_coordinates()
-                    return
-            local_x, altitude = self.inverse_local(x, y)
-            if projection == 1:
-                azimuth = (local_x + (self.local_sun_azimuth or 0)) % 360
-            else:
-                azimuth = (local_x + (self.local_sun_azimuth or 0) - 180) % 360
-            azimuth = float(np.asarray(azimuth))
-            altitude = float(np.asarray(altitude))
-            if (not np.isfinite(azimuth) or not np.isfinite(altitude) or
-                    altitude < -90.0 or altitude > 90.0):
-                self.show_invalid_coordinates()
-                return
-            target_altaz = SkyCoord(az=azimuth * u.deg, alt=altitude * u.deg, frame=frame_altaz)
-            target = target_altaz.transform_to('icrs')
+        frame_altaz = (
+            self.render_state["frame_altaz"] if self.render_state
+            else self.map_frame()
+        )
+        position = self.map_position_to_radec(
+            mouse_point.x(), mouse_point.y(), frame_altaz
+        )
+        if position is None:
+            self.show_invalid_coordinates()
+            return
+        ra, dec, azimuth, altitude = position
+        if azimuth is None:
+            azimuth, altitude = rotate_angles(
+                self.horizontal_rotation(frame_altaz), ra, dec
+            )
+            azimuth, altitude = float(azimuth), float(altitude)
+        self.last_cursor_radec = (ra, dec)
+        if self.sun_radec is not None:
+            elongation = float(angular_separation(
+                ra, dec, self.sun_radec[0], self.sun_radec[1]
+            ))
+            elongation_text = f"Elongace: {elongation:.1f}°"
         else:
-            azimuth = None
-            if self.projection_combo.currentIndex() == 1 and (x ** 2 / 8.0 + y ** 2 / 2.0 > 1.0):
-                self.show_invalid_coordinates()
-                return
-            ra, dec = self.inverse_global(x, y)
-            ra = float(np.asarray(ra))
-            dec = float(np.asarray(dec))
-            if (not np.isfinite(ra) or not np.isfinite(dec) or
-                    dec < -90.0 or dec > 90.0):
-                self.show_invalid_coordinates()
-                return
-            target = SkyCoord(ra=ra * u.deg, dec=dec * u.deg, frame='icrs')
-
-        sun_altaz = get_sun(eval_time).transform_to(frame_altaz)
-        self.current_sun_altitude = float(sun_altaz.alt.deg)
-        target_altaz = target.transform_to(frame_altaz)
-        elongation = target_altaz.separation(sun_altaz).deg
-        target = target.transform_to('icrs')
-        self.last_cursor_icrs = target
-        ra_hours = target.ra.deg / 15.0
-        display_azimuth = float(target_altaz.az.deg)
-        display_altitude = float(target_altaz.alt.deg)
+            elongation_text = "Elongace: --"
+        ra_hours = ra / 15.0
         self.coord_label.setText(
-            f"Az: {display_azimuth:5.1f}° | Alt: {display_altitude:+5.1f}°\n"
+            f"Az: {azimuth:5.1f}° | Alt: {altitude:+5.1f}°\n"
             f"RA: {int(ra_hours):02d}h {int((ra_hours % 1) * 60):02d}m "
-            f"| Dec: {target.dec.deg:+5.1f}°\n"
-            f"Elongace: {elongation:.1f}°\n"
+            f"| Dec: {dec:+5.1f}°\n"
+            f"{elongation_text}\n"
             f"{format_sun_altitude(self.current_sun_altitude)}\n"
             f"{format_moon_readout(self.current_moon_altitude, self.current_moon_phase)}"
         )
         if self.placement_check.isChecked() and self.workspace_tabs.currentIndex() == 1:
-            self.update_field_preview(target, frame_altaz, self.view_mode_combo.currentIndex() == 1)
+            self.update_field_preview(
+                (ra, dec), frame_altaz, self.view_mode_combo.currentIndex() == 1
+            )
         else:
             self.clear_field_preview()
 
@@ -2752,6 +3271,8 @@ class MainWindow(QMainWindow):
 
     def on_data_loaded(self, result):
         self.polygons, self.ref_time = result
+        self.polygon_arrays = self.build_polygon_arrays(self.polygons)
+        self.mer_polygon_cache = None
         self.uncovered_cache.clear()
         self.btn_load.setEnabled(True)
         self.update_data_button.setEnabled(True)
@@ -2768,6 +3289,7 @@ class MainWindow(QMainWindow):
 
     def on_stars_loaded(self, result):
         self.stars, error = result
+        self.star_arrays = self.build_star_arrays(self.stars)
         if error:
             self.status_label.setText(error)
         self.request_redraw()
@@ -2776,10 +3298,12 @@ class MainWindow(QMainWindow):
         (self.deep_sky_objects, self.comet_elements, self.asteroid_elements,
          self.milky_way_contours, warning) = result
         self.comet_position_cache = None
+        self.asteroid_arrays = build_asteroid_arrays(self.asteroid_elements)
         self.asteroid_position_cache = None
         self.milky_way_envelope = milky_way_outer_envelope(
             self.milky_way_contours
         )
+        self.refresh_small_body_status()
         if warning:
             self.status_label.setText(warning)
         else:
@@ -2792,9 +3316,114 @@ class MainWindow(QMainWindow):
         self.request_redraw()
 
     def transform_coords(self, ra_arr, dec_arr, frame_altaz):
-        sc = SkyCoord(ra=np.atleast_1d(ra_arr)*u.deg, dec=np.atleast_1d(dec_arr)*u.deg)
-        altaz = sc.transform_to(frame_altaz)
-        return altaz.az.deg, altaz.alt.deg
+        """Convert ICRS RA/Dec arrays to azimuth/altitude via a cached rotation."""
+        matrix = self.horizontal_rotation(frame_altaz)
+        return rotate_angles(
+            matrix, np.atleast_1d(ra_arr), np.atleast_1d(dec_arr)
+        )
+
+    def segments(self, x_values, y_values, max_step=None):
+        """Seam-safe line segments for one polyline or a 2-D batch of rows."""
+        projected = self.projection_combo.currentIndex() in (1, 3, 4)
+        if max_step is None:
+            max_step = self.projected_segment_limit()
+        return polyline_segments(x_values, y_values, projected, max_step)
+
+    def project_sky(self, ra, dec, frame_altaz, is_local):
+        """Project ICRS coordinates to the active map (keeps array shape)."""
+        ra = np.asarray(ra, dtype=float)
+        dec = np.asarray(dec, dtype=float)
+        if is_local:
+            azimuth, altitude = self.transform_coords(ra.ravel(), dec.ravel(), frame_altaz)
+            x_values, y_values = self.project_local(
+                self.local_azimuth(azimuth), altitude
+            )
+            return (np.asarray(x_values).reshape(ra.shape),
+                    np.asarray(y_values).reshape(ra.shape))
+        x_values, y_values = self.project_global(ra, dec)
+        return np.asarray(x_values), np.asarray(y_values)
+
+    def project_field_outlines(self, fields, frame_altaz, is_local, max_step=None):
+        """Return seam-safe projected outlines of planner fields."""
+        outlines = []
+        for field in fields:
+            try:
+                outlines.append(field_outline_arrays(field))
+            except (KeyError, TypeError, ValueError):
+                continue
+        if not outlines:
+            return np.empty(0), np.empty(0)
+        ra = np.vstack([outline[0] for outline in outlines])
+        dec = np.vstack([outline[1] for outline in outlines])
+        x_values, y_values = self.project_sky(ra, dec, frame_altaz, is_local)
+        return self.segments(
+            x_values, y_values,
+            self.projected_segment_limit(0.8) if max_step is None else max_step,
+        )
+
+    @staticmethod
+    def build_constellation_segments(lines):
+        """Return (N, 4) RA1, Dec1, RA2, Dec2 constellation stick segments."""
+        segments = []
+        for line in lines or []:
+            for index in range(len(line) - 1):
+                first, second = line[index], line[index + 1]
+                segments.append((first[0] % 360, first[1], second[0] % 360, second[1]))
+        return np.asarray(segments, dtype=float).reshape(-1, 4)
+
+    @staticmethod
+    def build_boundary_arrays(boundaries):
+        """Return boundary polylines as one RA/Dec array plus row offsets."""
+        arrays = []
+        for boundary in boundaries or []:
+            coordinates = np.asarray(boundary, dtype=float)
+            if coordinates.ndim == 2 and coordinates.shape[0] >= 2 and coordinates.shape[1] >= 2:
+                arrays.append(coordinates[:, :2])
+        if not arrays:
+            return None
+        lengths = np.array([len(item) for item in arrays])
+        coordinates = np.vstack(arrays)
+        coordinates[:, 0] %= 360.0
+        return coordinates, lengths
+
+    @staticmethod
+    def build_star_arrays(stars):
+        """Prepare star catalogue columns once after loading."""
+        if not stars:
+            return None
+        colors = [
+            tuple(star[5]) if len(star) > 5 else (225, 232, 255, 235)
+            for star in stars
+        ]
+        brush_cache = {}
+        brushes = np.empty(len(stars), dtype=object)
+        for index, color in enumerate(colors):
+            brush = brush_cache.get(color)
+            if brush is None:
+                brush = brush_cache[color] = pg.mkBrush(color)
+            brushes[index] = brush
+        return {
+            "ra": np.array([star[0] for star in stars], dtype=float),
+            "dec": np.array([star[1] for star in stars], dtype=float),
+            "mag": np.array([star[2] for star in stars], dtype=float),
+            "bayer": np.array([
+                star[3] if len(star) > 3 else "" for star in stars
+            ], dtype=object),
+            "brush": brushes,
+        }
+
+    @staticmethod
+    def build_polygon_arrays(polygons):
+        """Pack MPC footprints as (N, 5) RA/Dec arrays and a magnitude vector."""
+        if not polygons:
+            return None
+        try:
+            ra = np.asarray([polygon[0] for polygon in polygons], dtype=float)
+            dec = np.asarray([polygon[1] for polygon in polygons], dtype=float)
+        except ValueError:
+            return None
+        mag = np.asarray([polygon[2] for polygon in polygons], dtype=float)
+        return {"ra": ra, "dec": dec, "mag": mag}
 
     def local_azimuth(self, azimuth):
         if self.local_sun_azimuth is None:
@@ -2919,13 +3548,16 @@ class MainWindow(QMainWindow):
         return propagate_asteroid(element, jd)
 
     def current_asteroid_positions(self, eval_time):
-        """Return MPC bright asteroids currently at V <= 12 mag."""
+        """Return (indices, RA, Dec, V) of asteroids currently at V <= 14 mag."""
         cache_key = round(float(eval_time.tt.jd), 5)
         if (self.asteroid_position_cache is not None
                 and self.asteroid_position_cache[0] == cache_key):
             return self.asteroid_position_cache[1]
-        if not self.asteroid_elements:
-            return []
+        empty = (
+            np.zeros(0, dtype=int), np.zeros(0), np.zeros(0), np.zeros(0)
+        )
+        if self.asteroid_arrays is None:
+            return empty
 
         earth_equatorial = (
             get_body_barycentric("earth", eval_time).xyz.to_value(u.au)
@@ -2939,44 +3571,13 @@ class MainWindow(QMainWindow):
             -earth_equatorial[1] * math.sin(obliquity)
             + earth_equatorial[2] * math.cos(obliquity),
         ])
-        positions = []
-        for element in self.asteroid_elements:
-            result = self.asteroid_heliocentric_ecliptic(element, eval_time.tt.jd)
-            if result is None:
-                continue
-            ecliptic, radius = result
-            geocentric_ecliptic = ecliptic - earth_ecliptic
-            distance = float(np.linalg.norm(geocentric_ecliptic))
-            if distance <= 0.0 or radius <= 0.0:
-                continue
-            to_sun = -ecliptic / radius
-            to_earth = (earth_ecliptic - ecliptic) / distance
-            phase_angle = math.acos(float(np.clip(np.dot(to_sun, to_earth), -1.0, 1.0)))
-            tangent = max(math.tan(phase_angle / 2.0), 0.0)
-            phi1 = math.exp(-3.33 * tangent ** 0.63)
-            phi2 = math.exp(-1.87 * tangent ** 1.22)
-            phase_function = max(
-                (1.0 - element["g"]) * phi1 + element["g"] * phi2,
-                1e-12,
-            )
-            magnitude = (
-                element["h"] + 5.0 * math.log10(radius * distance)
-                - 2.5 * math.log10(phase_function)
-            )
-            if not np.isfinite(magnitude) or magnitude > 12.0:
-                continue
-            equatorial = np.array([
-                geocentric_ecliptic[0],
-                geocentric_ecliptic[1] * math.cos(obliquity)
-                - geocentric_ecliptic[2] * math.sin(obliquity),
-                geocentric_ecliptic[1] * math.sin(obliquity)
-                + geocentric_ecliptic[2] * math.cos(obliquity),
-            ])
-            ra = math.degrees(math.atan2(equatorial[1], equatorial[0])) % 360.0
-            dec = math.degrees(math.asin(float(np.clip(
-                equatorial[2] / distance, -1.0, 1.0
-            ))))
-            positions.append((ra, dec, float(magnitude), element["number"]))
+        ra, dec, magnitude = asteroid_apparent_positions(
+            self.asteroid_arrays, eval_time.tt.jd, earth_ecliptic
+        )
+        keep = np.isfinite(magnitude) & (magnitude <= ASTEROID_MAGNITUDE_LIMIT)
+        positions = (
+            np.where(keep)[0], ra[keep], dec[keep], magnitude[keep]
+        )
         self.asteroid_position_cache = (cache_key, positions)
         return positions
 
@@ -2993,7 +3594,6 @@ class MainWindow(QMainWindow):
         argument += variant * 0.9
         perihelion_distance *= 1.0 + variant * 0.025
 
-        reference_perihelion = eval_time + float(days_before) * u.day
         days_from_perihelion = -float(days_before)
         gravitational_parameter = 0.0002959122083
         semi_latus_rectum = perihelion_distance * (1.0 + eccentricity)
@@ -3017,21 +3617,31 @@ class MainWindow(QMainWindow):
         y = (sin_node * cos_arg + cos_node * sin_arg * cos_inc) * x_orbit + (-sin_node * sin_arg + cos_node * cos_arg * cos_inc) * y_orbit
         z = (sin_arg * sin_inc) * x_orbit + (cos_arg * sin_inc) * y_orbit
 
-        ecliptic_frame = HeliocentricMeanEcliptic(equinox='J2000')
-        earth_barycentric = get_body_barycentric('earth', eval_time) - get_body_barycentric('sun', eval_time)
-        earth = SkyCoord(
-            x=earth_barycentric.x, y=earth_barycentric.y, z=earth_barycentric.z,
-            representation_type='cartesian', frame='icrs'
-        ).transform_to(ecliptic_frame)
-        geo_x = x - earth.cartesian.x.to_value(u.au)
-        geo_y = y - earth.cartesian.y.to_value(u.au)
-        geo_z = z - earth.cartesian.z.to_value(u.au)
-        comet = SkyCoord(
-            x=geo_x * u.au, y=geo_y * u.au, z=geo_z * u.au,
-            representation_type='cartesian',
-            frame=ecliptic_frame
-        ).transform_to('icrs')
-        return float(comet.ra.deg), float(comet.dec.deg)
+        # Heliocentrický vektor J2000 ekliptiky → rovník jednou rotací kolem
+        # osy x; poloha Země se pro daný čas počítá jen jednou (cache).
+        obliquity = math.radians(23.4392911)
+        equatorial = np.array([
+            x,
+            y * math.cos(obliquity) - z * math.sin(obliquity),
+            y * math.sin(obliquity) + z * math.cos(obliquity),
+        ])
+        geocentric = equatorial - self.earth_heliocentric_equatorial(eval_time)
+        distance = float(np.linalg.norm(geocentric))
+        ra = math.degrees(math.atan2(geocentric[1], geocentric[0])) % 360.0
+        dec = math.degrees(math.asin(float(np.clip(geocentric[2] / distance, -1.0, 1.0))))
+        return ra, dec
+
+    def earth_heliocentric_equatorial(self, eval_time):
+        """Cached heliocentric ICRS position of the Earth in AU."""
+        key = (float(eval_time.jd1), float(eval_time.jd2))
+        if self.kreutz_earth_cache is not None and self.kreutz_earth_cache[0] == key:
+            return self.kreutz_earth_cache[1]
+        vector = (
+            get_body_barycentric("earth", eval_time).xyz.to_value(u.au)
+            - get_body_barycentric("sun", eval_time).xyz.to_value(u.au)
+        )
+        self.kreutz_earth_cache = (key, vector)
+        return vector
 
     def add_kreutz_corridors(self, eval_time, frame_altaz, is_local):
         if not self.kreutz_check.isChecked():
@@ -3047,35 +3657,24 @@ class MainWindow(QMainWindow):
             corridor_x, corridor_y = [], []
             central_markers = []
             for variant in np.linspace(-2.0, 2.0, 9):
-                points_x, points_y = [], []
-                for days_before in days_values:
-                    ra, dec = self.kreutz_position(eval_time, days_before, population, variant)
-                    if is_local:
-                        az, alt = self.transform_coords(ra, dec, frame_altaz)
-                        x, y = self.project_local(self.local_azimuth(az), alt)
-                    else:
-                        x, y = self.project_global([ra], [dec])
-                    points_x.append(float(x[0]))
-                    points_y.append(float(y[0]))
-                    if np.isclose(variant, 0.0) and days_before in marker_days:
-                        central_markers.append((days_before, points_x[-1], points_y[-1]))
-                for index in range(len(points_x) - 1):
-                    if is_local and self.projection_combo.currentIndex() in (1, 3, 4):
-                        append_projected_segment(
-                            corridor_x, corridor_y,
-                            points_x[index], points_y[index],
-                            points_x[index + 1], points_y[index + 1],
-                            self.projected_segment_limit(0.5),
-                        )
-                    elif is_local:
-                        append_sky_segment(corridor_x, corridor_y, points_x[index], points_y[index], points_x[index + 1], points_y[index + 1])
-                    else:
-                        append_projected_segment(
-                            corridor_x, corridor_y,
-                            points_x[index], points_y[index],
-                            points_x[index + 1], points_y[index + 1],
-                            self.projected_segment_limit(0.5),
-                        ) if self.projection_combo.currentIndex() in (1, 3, 4) else append_sky_segment(corridor_x, corridor_y, points_x[index], points_y[index], points_x[index + 1], points_y[index + 1])
+                positions = np.array([
+                    self.kreutz_position(eval_time, days_before, population, variant)
+                    for days_before in days_values
+                ])
+                x, y = self.project_sky(
+                    positions[:, 0], positions[:, 1], frame_altaz, is_local
+                )
+                if np.isclose(variant, 0.0):
+                    central_markers.extend(
+                        (days_before, float(x[index]), float(y[index]))
+                        for index, days_before in enumerate(days_values)
+                        if days_before in marker_days
+                    )
+                segment_x, segment_y = self.segments(
+                    x, y, self.projected_segment_limit(0.5)
+                )
+                corridor_x.extend(segment_x.tolist())
+                corridor_y.extend(segment_y.tolist())
             self.add_curve(corridor_x, corridor_y, pg.mkPen(color=color, width=1.5, style=line_style), 6)
 
             central_markers = [
@@ -3108,63 +3707,26 @@ class MainWindow(QMainWindow):
                 self.plot_widget.addItem(label)
 
     def add_constellation_boundaries(self, frame_altaz, is_local):
-        if not self.const_boundaries_check.isChecked() or not self.const_boundaries:
+        if not self.const_boundaries_check.isChecked() or self.const_boundary_cache is None:
             return
-
-        boundary_arrays = []
-        for boundary in self.const_boundaries:
-            coordinates = np.asarray(boundary, dtype=float)
-            if coordinates.ndim == 2 and coordinates.shape[0] >= 2 and coordinates.shape[1] >= 2:
-                boundary_arrays.append(coordinates[:, :2])
-
-        if not boundary_arrays:
-            return
-
-        transformed = None
-        if is_local:
-            all_ra = np.concatenate([coordinates[:, 0] % 360.0 for coordinates in boundary_arrays])
-            all_dec = np.concatenate([coordinates[:, 1] for coordinates in boundary_arrays])
-            transformed = self.transform_coords(all_ra, all_dec, frame_altaz)
-
-        boundary_x, boundary_y = [], []
-        offset = 0
-        projected = self.projection_combo.currentIndex() in (1, 3, 4)
-        for coordinates in boundary_arrays:
-            point_count = len(coordinates)
-            if is_local:
-                azimuth = transformed[0][offset:offset + point_count]
-                altitude = transformed[1][offset:offset + point_count]
-                offset += point_count
-                x_values, y_values = self.project_local(
-                    self.local_azimuth(azimuth), altitude
-                )
-            else:
-                altitude = None
-                x_values, y_values = self.project_global(
-                    coordinates[:, 0], coordinates[:, 1]
-                )
-
-            for index in range(point_count - 1):
-                if projected:
-                    append_projected_segment(
-                        boundary_x, boundary_y,
-                        x_values[index], y_values[index],
-                        x_values[index + 1], y_values[index + 1],
-                        self.projected_segment_limit(),
-                    )
-                else:
-                    append_sky_segment(
-                        boundary_x, boundary_y,
-                        x_values[index], y_values[index],
-                        x_values[index + 1], y_values[index + 1],
-                    )
-
+        coordinates, lengths = self.const_boundary_cache
+        x_values, y_values = self.project_sky(
+            coordinates[:, 0], coordinates[:, 1], frame_altaz, is_local
+        )
+        # Úsečky jen uvnitř jedné hranice, nikdy mezi koncem a začátkem další.
+        last_points = np.cumsum(lengths) - 1
+        keep = np.ones(len(x_values) - 1, dtype=bool)
+        keep[last_points[:-1]] = False
+        boundary_x, boundary_y = self.pair_segments(
+            x_values[:-1][keep], y_values[:-1][keep],
+            x_values[1:][keep], y_values[1:][keep],
+        )
         self.add_curve(
             boundary_x,
             boundary_y,
             pg.mkPen(
-                color=(188, 137, 72, 105),
-                width=0.75,
+                color=CONSTELLATION_BOUNDARY_COLOR,
+                width=0.65,
                 style=Qt.PenStyle.DashLine,
             ),
             3,
@@ -3177,18 +3739,65 @@ class MainWindow(QMainWindow):
         item.setZValue(z_value)
         self.plot_widget.addItem(item)
 
+    def raster_grid(self):
+        """Return the raster extent plus its inverse-projected grid (cached).
+
+        The below-horizon shading and the Milky Way fill share one grid, so the
+        inverse projection runs once per view refresh.
+        """
+        extent = self.raster_extent()
+        key = (
+            extent, self.view_mode_combo.currentIndex(),
+            self.projection_combo.currentIndex(),
+            round(float(self.mercator_center_ra), 9),
+            round(float(self.mercator_center_dec), 9),
+            round(float(self.mercator_center_azimuth), 9),
+            round(float(self.mercator_center_altitude), 9),
+        )
+        cached = getattr(self, "raster_grid_cache", None)
+        if cached is not None and cached[0] == key:
+            return cached[1]
+        x_min, x_max, y_min, y_max, columns, rows = extent
+        grid_x, grid_y = np.meshgrid(
+            np.linspace(x_min, x_max, columns),
+            np.linspace(y_min, y_max, rows),
+        )
+        if self.view_mode_combo.currentIndex() == 1:
+            first, second = self.inverse_local(grid_x, grid_y)
+        else:
+            first, second = self.inverse_global(grid_x, grid_y)
+        result = (extent, grid_x, grid_y, np.asarray(first), np.asarray(second))
+        self.raster_grid_cache = (key, result)
+        return result
+
+    def raster_extent(self, margin=0.35):
+        """Return an enlarged view rectangle and grid size for raster layers.
+
+        Rasters cover the view plus ``margin`` of its size on every side, so
+        a moderate pan never reveals an unpainted edge before the debounced
+        refresh rebuilds them.
+        """
+        x_range, y_range = self.plot_widget.getViewBox().viewRange()
+        x_min, x_max = sorted(float(value) for value in x_range)
+        y_min, y_max = sorted(float(value) for value in y_range)
+        width, height = x_max - x_min, y_max - y_min
+        scale = 1.0 + 2.0 * margin
+        columns = int(np.clip(self.plot_widget.width() // 4 * scale, 180, 840))
+        rows = int(np.clip(self.plot_widget.height() // 4 * scale, 100, 520))
+        return (
+            x_min - width * margin, x_max + width * margin,
+            y_min - height * margin, y_max + height * margin,
+            columns, rows,
+        )
+
     def add_below_horizon_shading(self):
         """Shade the local hemisphere below altitude 0 without hiding objects."""
-        x_range, y_range = self.plot_widget.getViewBox().viewRange()
         if self.projection_combo.currentIndex() == 3:
+            x_min, x_max, y_min, y_max, _, _ = self.raster_extent()
             # In the local stereographic projection altitude 0 is exactly the
             # circle r=2.  Keep that boundary as a vector path: rasterising the
             # mask made the horizon visibly stair-stepped at shallow slopes.
-            outer_rect = QRectF(
-                float(x_range[0]), float(y_range[0]),
-                float(x_range[1] - x_range[0]),
-                float(y_range[1] - y_range[0]),
-            )
+            outer_rect = QRectF(x_min, y_min, x_max - x_min, y_max - y_min)
             ground_path = QPainterPath()
             ground_path.setFillRule(Qt.FillRule.OddEvenFill)
             ground_path.addRect(outer_rect)
@@ -3200,85 +3809,53 @@ class MainWindow(QMainWindow):
             self.plot_widget.addItem(ground)
             return
 
-        columns = int(np.clip(self.plot_widget.width() // 4, 180, 420))
-        rows = int(np.clip(self.plot_widget.height() // 4, 100, 260))
-        x_values = np.linspace(x_range[0], x_range[1], columns)
-        y_values = np.linspace(y_range[0], y_range[1], rows)
-        grid_x, grid_y = np.meshgrid(x_values, y_values)
-        _, altitude = self.inverse_local(grid_x, grid_y)
-        below = np.isfinite(altitude) & (np.asarray(altitude) < 0.0)
+        extent, grid_x, grid_y, _, altitude = self.raster_grid()
+        x_min, x_max, y_min, y_max, columns, rows = extent
+        with np.errstate(invalid="ignore"):
+            below = np.isfinite(altitude) & (altitude < 0.0)
         if self.projection_combo.currentIndex() == 1:
             below &= grid_x ** 2 / 8.0 + grid_y ** 2 / 2.0 <= 1.0
         image_data = np.zeros((rows, columns, 4), dtype=np.uint8)
         image_data[below] = (125, 82, 45, 38)
         ground = pg.ImageItem(image=image_data, axisOrder="row-major")
-        ground.setRect(QRectF(
-            float(x_range[0]), float(y_range[0]),
-            float(x_range[1] - x_range[0]), float(y_range[1] - y_range[0]),
-        ))
+        ground.setRect(QRectF(x_min, y_min, x_max - x_min, y_max - y_min))
         ground.setZValue(-20)
         self.plot_widget.addItem(ground)
 
     def add_milky_way(self, frame_altaz, is_local):
-        """Draw only the outer Milky Way boundary with a faint interior fill."""
+        """Draw only the outer Milky Way boundary (fill is a view layer)."""
         if not self.milky_way_check.isChecked() or self.milky_way_envelope is None:
             return
         sample_ra, lower_dec, upper_dec = self.milky_way_envelope
-        coordinates = np.column_stack((
-            np.concatenate((sample_ra, sample_ra)),
-            np.concatenate((lower_dec, upper_dec)),
-        ))
-        if is_local:
-            longitude, latitude = self.transform_coords(
-                coordinates[:, 0], coordinates[:, 1], frame_altaz
-            )
-            px, py = self.project_local(
-                self.local_azimuth(longitude), latitude
-            )
-        else:
-            px, py = self.project_global(coordinates[:, 0], coordinates[:, 1])
-        px, py = np.asarray(px), np.asarray(py)
-        projection = self.projection_combo.currentIndex()
-        projected = projection in (1, 3, 4)
-        step_limit = self.projected_segment_limit() if projected else 180.0
-        contour_x, contour_y = [], []
-        boundary_length = len(sample_ra)
-        for boundary_index in range(2):
-            offset = boundary_index * boundary_length
-            boundary_x = px[offset:offset + boundary_length]
-            boundary_y = py[offset:offset + boundary_length]
-            for point_index in range(boundary_length - 1):
-                values = (
-                    boundary_x[point_index], boundary_y[point_index],
-                    boundary_x[point_index + 1], boundary_y[point_index + 1],
-                )
-                if not all(np.isfinite(value) for value in values):
-                    continue
-                if projected:
-                    append_projected_segment(
-                        contour_x, contour_y, *values, max_step=step_limit
-                    )
-                else:
-                    append_sky_segment(contour_x, contour_y, *values)
+        ra = np.vstack((sample_ra, sample_ra))
+        dec = np.vstack((lower_dec, upper_dec))
+        px, py = self.project_sky(ra, dec, frame_altaz, is_local)
+        contour_x, contour_y = self.segments(px, py)
+        self.add_curve(
+            contour_x, contour_y,
+            pg.mkPen(color=(195, 212, 238, 95), width=0.8), -15,
+        )
 
+    def add_milky_way_fill(self, frame_altaz, is_local):
+        """Faint interior fill of the Milky Way as a view-dependent raster."""
+        if not self.milky_way_check.isChecked() or self.milky_way_envelope is None:
+            return
+        sample_ra, lower_dec, upper_dec = self.milky_way_envelope
+        projection = self.projection_combo.currentIndex()
         # Classify a modest screen-space grid back in sky coordinates. A
         # projected closed path would draw a false chord across the map seam;
         # this raster mask stays correct in every supported projection.
-        x_range, y_range = self.plot_widget.getViewBox().viewRange()
-        columns = int(np.clip(self.plot_widget.width() // 4, 200, 420))
-        rows = int(np.clip(self.plot_widget.height() // 4, 120, 260))
-        grid_x, grid_y = np.meshgrid(
-            np.linspace(x_range[0], x_range[1], columns),
-            np.linspace(y_range[0], y_range[1], rows),
-        )
+        extent, grid_x, grid_y, first, second = self.raster_grid()
+        x_min, x_max, y_min, y_max, columns, rows = extent
         if is_local:
-            local_x, altitude = self.inverse_local(grid_x, grid_y)
+            local_x, altitude = first, second
             if projection == 1:
                 azimuth = (local_x + (self.local_sun_azimuth or 0.0)) % 360.0
             else:
                 azimuth = (
                     local_x + (self.local_sun_azimuth or 0.0) - 180.0
                 ) % 360.0
+            altitude = np.asarray(altitude)
             valid = (
                 np.isfinite(azimuth) & np.isfinite(altitude)
                 & (altitude >= -90.0) & (altitude <= 90.0)
@@ -3288,41 +3865,35 @@ class MainWindow(QMainWindow):
             ra = np.full(grid_x.shape, np.nan)
             dec = np.full(grid_y.shape, np.nan)
             if np.any(valid):
-                sky = SkyCoord(
-                    az=np.asarray(azimuth)[valid] * u.deg,
-                    alt=np.asarray(altitude)[valid] * u.deg,
-                    frame=frame_altaz,
-                ).transform_to("icrs")
-                ra[valid] = sky.ra.deg
-                dec[valid] = sky.dec.deg
+                ra[valid], dec[valid] = self.horizontal_to_icrs(
+                    np.asarray(azimuth)[valid], altitude[valid], frame_altaz
+                )
         else:
-            ra, dec = self.inverse_global(grid_x, grid_y)
-            ra, dec = np.asarray(ra), np.asarray(dec)
-            valid = (
-                np.isfinite(ra) & np.isfinite(dec)
-                & (dec >= -90.0) & (dec <= 90.0)
-            )
+            ra, dec = first, second
+            with np.errstate(invalid="ignore"):
+                valid = (
+                    np.isfinite(ra) & np.isfinite(dec)
+                    & (dec >= -90.0) & (dec <= 90.0)
+                )
             if projection == 1:
                 valid &= grid_x ** 2 / 8.0 + grid_y ** 2 / 2.0 <= 1.0
 
-        normalized_ra = np.asarray(ra) % 360.0
+        normalized_ra = np.nan_to_num(np.asarray(ra)) % 360.0
         query_lower = np.interp(normalized_ra, sample_ra, lower_dec)
         query_upper = np.interp(normalized_ra, sample_ra, upper_dec)
-        milky_way = valid & (dec >= query_lower) & (dec <= query_upper)
+        with np.errstate(invalid="ignore"):
+            milky_way = valid & (dec >= query_lower) & (dec <= query_upper)
         image_data = np.zeros((rows, columns, 4), dtype=np.uint8)
         image_data[milky_way] = (190, 210, 240, 26)
         fill_item = pg.ImageItem(image=image_data, axisOrder="row-major")
-        fill_item.setRect(QRectF(
-            float(x_range[0]), float(y_range[0]),
-            float(x_range[1] - x_range[0]),
-            float(y_range[1] - y_range[0]),
-        ))
+        fill_item.setRect(QRectF(x_min, y_min, x_max - x_min, y_max - y_min))
         fill_item.setZValue(-16)
         self.plot_widget.addItem(fill_item)
-        self.add_curve(
-            contour_x, contour_y,
-            pg.mkPen(color=(195, 212, 238, 95), width=0.8), -15,
-        )
+
+    def culling_range(self):
+        """View range enlarged like the raster layers for marker culling."""
+        x_min, x_max, y_min, y_max, _, _ = self.raster_extent()
+        return (x_min, x_max), (y_min, y_max)
 
     def add_deep_sky_objects(self, frame_altaz, is_local):
         if (not self.dso_check.isChecked() or not self.deep_sky_objects
@@ -3339,7 +3910,7 @@ class MainWindow(QMainWindow):
             x_values, y_values = self.project_global(ra, dec)
         x_values = np.asarray(x_values)
         y_values = np.asarray(y_values)
-        x_range, y_range = self.plot_widget.getViewBox().viewRange()
+        x_range, y_range = self.culling_range()
         visible = (
             np.isfinite(x_values) & np.isfinite(y_values)
             & (x_values >= x_range[0]) & (x_values <= x_range[1])
@@ -3389,17 +3960,20 @@ class MainWindow(QMainWindow):
             return
         ra = np.asarray([item[0] for item in comets])
         dec = np.asarray([item[1] for item in comets])
-        azimuth, altitude = self.transform_coords(ra, dec, frame_altaz)
-        above_horizon = np.asarray(altitude) >= 0.0
         if is_local:
+            # Only the horizontal view hides objects below the horizon; the
+            # global map shows the whole sky regardless of the observatory.
+            azimuth, altitude = self.transform_coords(ra, dec, frame_altaz)
+            above_horizon = np.asarray(altitude) >= 0.0
             x_values, y_values = self.project_local(
                 self.local_azimuth(azimuth), altitude
             )
         else:
+            above_horizon = np.ones(len(comets), dtype=bool)
             x_values, y_values = self.project_global(ra, dec)
         x_values = np.asarray(x_values)
         y_values = np.asarray(y_values)
-        x_range, y_range = self.plot_widget.getViewBox().viewRange()
+        x_range, y_range = self.culling_range()
         visible = (
             above_horizon & np.isfinite(x_values) & np.isfinite(y_values)
             & (x_values >= x_range[0]) & (x_values <= x_range[1])
@@ -3411,9 +3985,9 @@ class MainWindow(QMainWindow):
         magnitudes = np.asarray([item[2] for item in comets])
         marker = pg.ScatterPlotItem(
             x=x_values[indices], y=y_values[indices],
-            size=np.clip(17.0 - 0.55 * magnitudes[indices], 6.0, 13.0),
-            symbol="d", brush=pg.mkBrush(100, 235, 225, 210),
-            pen=pg.mkPen((220, 255, 250, 240), width=1.0),
+            size=np.clip(22.0 - 0.6 * magnitudes[indices], 11.0, 18.0),
+            symbol=comet_symbol(), brush=pg.mkBrush(100, 235, 225, 225),
+            pen=pg.mkPen((220, 255, 250, 200), width=0.6),
         )
         marker.setZValue(26)
         self.plot_widget.addItem(marker)
@@ -3421,23 +3995,24 @@ class MainWindow(QMainWindow):
         if self.approximate_horizontal_fov() <= 85.0:
             for index in indices[np.argsort(magnitudes[indices])[:30]]:
                 label = pg.TextItem(
-                    text=f'☄ {comets[index][3]}  {magnitudes[index]:.1f}m',
-                    color=(125, 245, 235, 225), anchor=(-0.08, 1.15),
+                    text=f'{comets[index][3]}  {magnitudes[index]:.1f}m',
+                    color=(125, 245, 235, 225), anchor=(-0.12, 1.0),
                 )
                 label.setZValue(27)
                 label.setPos(float(x_values[index]), float(y_values[index]))
                 self.plot_widget.addItem(label)
 
     def add_bright_asteroids(self, eval_time, frame_altaz, is_local):
-        """Draw numbered V<=12 asteroids only in a sufficiently close view."""
+        """Draw V<=14 asteroids in a close view, with labels when zoomed in."""
+        field_width = self.approximate_horizontal_fov()
         if (not self.asteroids_check.isChecked()
-                or self.approximate_horizontal_fov() > 55.0):
+                or field_width > ASTEROID_MARKER_FOV):
             return
-        asteroids = self.current_asteroid_positions(eval_time)
-        if not asteroids:
+        element_indices, ra, dec, magnitudes = (
+            self.current_asteroid_positions(eval_time)
+        )
+        if len(element_indices) == 0:
             return
-        ra = np.asarray([item[0] for item in asteroids])
-        dec = np.asarray([item[1] for item in asteroids])
         if is_local:
             azimuth, altitude = self.transform_coords(ra, dec, frame_altaz)
             above_horizon = np.asarray(altitude) >= 0.0
@@ -3445,10 +4020,10 @@ class MainWindow(QMainWindow):
                 self.local_azimuth(azimuth), altitude
             )
         else:
-            above_horizon = np.ones(len(asteroids), dtype=bool)
+            above_horizon = np.ones(len(element_indices), dtype=bool)
             x_values, y_values = self.project_global(ra, dec)
         x_values, y_values = np.asarray(x_values), np.asarray(y_values)
-        x_range, y_range = self.plot_widget.getViewBox().viewRange()
+        x_range, y_range = self.culling_range()
         visible = (
             above_horizon & np.isfinite(x_values) & np.isfinite(y_values)
             & (x_values >= x_range[0]) & (x_values <= x_range[1])
@@ -3457,20 +4032,25 @@ class MainWindow(QMainWindow):
         indices = np.where(visible)[0]
         if len(indices) == 0:
             return
-        magnitudes = np.asarray([item[2] for item in asteroids])
         marker = pg.ScatterPlotItem(
             x=x_values[indices], y=y_values[indices],
-            size=np.clip(12.5 - 0.55 * magnitudes[indices], 5.0, 8.0),
-            symbol="o", brush=pg.mkBrush(230, 195, 125, 195),
-            pen=pg.mkPen((255, 230, 175, 220), width=0.7),
+            size=np.clip(13.0 - 0.6 * magnitudes[indices], 4.5, 8.5),
+            symbol="o", brush=pg.mkBrush(*ASTEROID_FILL_COLOR),
+            pen=pg.mkPen(ASTEROID_EDGE_COLOR, width=0.7),
         )
         marker.setZValue(25)
         self.plot_widget.addItem(marker)
+
+        detailed = field_width <= ASTEROID_DETAIL_FOV
+        limit = ASTEROID_DETAIL_LABELS if detailed else ASTEROID_NUMBER_LABELS
         label_font = QFont("Segoe UI", 8)
-        for index in indices:
+        for index in indices[np.argsort(magnitudes[indices])[:limit]]:
+            element = self.asteroid_elements[int(element_indices[index])]
             label = pg.TextItem(
-                text=str(asteroids[index][3]),
-                color=(205, 185, 145, 185), anchor=(-0.18, 0.72),
+                text=SupplementCatalogReader.asteroid_label(
+                    element, detailed, float(magnitudes[index])
+                ),
+                color=ASTEROID_LABEL_COLOR, anchor=(-0.18, 0.72),
             )
             label.setFont(label_font)
             label.setZValue(26)
@@ -3483,26 +4063,40 @@ class MainWindow(QMainWindow):
             return
 
         label_font = QFont("Segoe UI", 9, QFont.Weight.DemiBold)
-        bodies = []
-        if moon is not None:
-            bodies.append((moon, "Mě", (235, 238, 245, 255), 12))
-        bodies.extend(
-            (get_body(body_name, eval_time), label_text, color, marker_size)
-            for body_name, (label_text, color, marker_size) in PLANET_STYLES.items()
+        # Topocentrické polohy (paralaxa Měsíce) přes astropy, ale jen jednou
+        # pro daný čas a observatoř.
+        cache_key = (
+            float(eval_time.jd1), float(eval_time.jd2),
+            self.obs_combo.currentText(),
         )
-        for body, label_text, color, marker_size in bodies:
-            if is_local:
+        if self.planet_position_cache is not None and self.planet_position_cache[0] == cache_key:
+            bodies = self.planet_position_cache[1]
+        else:
+            sources = []
+            if moon is not None:
+                sources.append((moon, "Mě", (235, 238, 245, 255), 12))
+            sources.extend(
+                (get_body(body_name, eval_time), label_text, color, marker_size)
+                for body_name, (label_text, color, marker_size) in PLANET_STYLES.items()
+            )
+            bodies = []
+            for body, label_text, color, marker_size in sources:
                 body_altaz = body.transform_to(frame_altaz)
-                altitude = float(body_altaz.alt.deg)
+                bodies.append((
+                    float(body.ra.deg), float(body.dec.deg),
+                    float(body_altaz.az.deg), float(body_altaz.alt.deg),
+                    label_text, color, marker_size,
+                ))
+            self.planet_position_cache = (cache_key, bodies)
+        for ra, dec, azimuth, altitude, label_text, color, marker_size in bodies:
+            if is_local:
                 if altitude < 0.0:
                     continue
                 x_values, y_values = self.project_local(
-                    self.local_azimuth([float(body_altaz.az.deg)]), [altitude]
+                    self.local_azimuth([azimuth]), [altitude]
                 )
             else:
-                x_values, y_values = self.project_global(
-                    [float(body.ra.deg)], [float(body.dec.deg)]
-                )
+                x_values, y_values = self.project_global([ra], [dec])
 
             x_value = float(np.asarray(x_values)[0])
             y_value = float(np.asarray(y_values)[0])
@@ -3565,40 +4159,20 @@ class MainWindow(QMainWindow):
     def add_planner_field_group(self, fields, color, width, z_value,
                                 frame_altaz, is_local):
         """Project and draw one planner group with a shared visual style."""
-        line_x, line_y = [], []
+        line_x, line_y = self.project_field_outlines(fields, frame_altaz, is_local)
         center_x, center_y = [], []
+        centres = []
         for field in fields:
             try:
-                vertices = field_outline(field)
+                centres.append((float(field["ra_deg"]), float(field["dec_deg"])))
             except (KeyError, TypeError, ValueError):
                 continue
-            ra = np.asarray([point[0] for point in vertices])
-            dec = np.asarray([point[1] for point in vertices])
-            if is_local:
-                azimuth, altitude = self.transform_coords(ra, dec, frame_altaz)
-                px, py = self.project_local(self.local_azimuth(azimuth), altitude)
-                center_az, center_alt = self.transform_coords(
-                    [field["ra_deg"]], [field["dec_deg"]], frame_altaz
-                )
-                cx, cy = self.project_local(self.local_azimuth(center_az), center_alt)
-            else:
-                px, py = self.project_global(ra, dec)
-                cx, cy = self.project_global([field["ra_deg"]], [field["dec_deg"]])
-            if np.isfinite(cx[0]) and np.isfinite(cy[0]):
-                center_x.append(float(cx[0]))
-                center_y.append(float(cy[0]))
-            for edge_index in range(len(px) - 1):
-                values = (px[edge_index], py[edge_index], px[edge_index + 1], py[edge_index + 1])
-                if not all(np.isfinite(value) for value in values):
-                    continue
-                if self.projection_combo.currentIndex() in (1, 3, 4):
-                    append_projected_segment(
-                        line_x, line_y, *values,
-                        max_step=self.projected_segment_limit(0.8),
-                    )
-                else:
-                    append_sky_segment(line_x, line_y, *values)
-        if line_x:
+        if centres:
+            centres = np.asarray(centres)
+            cx, cy = self.project_sky(centres[:, 0], centres[:, 1], frame_altaz, is_local)
+            finite = np.isfinite(cx) & np.isfinite(cy)
+            center_x, center_y = cx[finite].tolist(), cy[finite].tolist()
+        if len(line_x):
             outline = pg.PlotCurveItem(
                 x=np.asarray(line_x), y=np.asarray(line_y),
                 pen=pg.mkPen(color=color, width=width), connect="finite",
@@ -3613,15 +4187,17 @@ class MainWindow(QMainWindow):
             centres.setZValue(z_value + 1)
             self.plot_widget.addItem(centres)
 
-    def refresh_bayer_labels(self):
-        for item in self.bayer_label_items:
+    def remove_bayer_labels(self, keep=0):
+        for item in self.bayer_label_items[keep:]:
             try:
                 self.plot_widget.removeItem(item)
-            except RuntimeError:
+            except (RuntimeError, ValueError):
                 pass
-        self.bayer_label_items = []
+        del self.bayer_label_items[keep:]
 
+    def refresh_bayer_labels(self):
         if not self.bayer_labels_check.isChecked() or not self.bayer_label_data:
+            self.remove_bayer_labels()
             return
 
         star_x, star_y, star_mag, star_bayer = self.bayer_label_data
@@ -3656,7 +4232,7 @@ class MainWindow(QMainWindow):
         min_dx = x_span * 27.0 / max(self.plot_widget.width(), 1)
         min_dy = y_span * 17.0 / max(self.plot_widget.height(), 1)
         accepted = []
-        label_font = QFont("Segoe UI Symbol", 9, QFont.Weight.DemiBold)
+        texts = []
         for index in candidates[np.argsort(star_mag[candidates])]:
             x_value = float(star_x[index])
             y_value = float(star_y[index])
@@ -3666,16 +4242,28 @@ class MainWindow(QMainWindow):
             ):
                 continue
             accepted.append((x_value, y_value))
-            label = pg.TextItem(
-                text=str(star_bayer[index]),
-                color=(218, 230, 255, 225),
-                anchor=(-0.28, 0.62),
-            )
-            label.setFont(label_font)
-            label.setZValue(22)
+            texts.append(str(star_bayer[index]))
+
+        # Existující popisky se po posunu jen přepíšou a přesunou; vytváření
+        # nových TextItem je výrazně dražší.
+        label_font = QFont("Segoe UI Symbol", 9, QFont.Weight.DemiBold)
+        for label_index, ((x_value, y_value), text) in enumerate(zip(accepted, texts)):
+            if label_index < len(self.bayer_label_items):
+                label = self.bayer_label_items[label_index]
+                if label.toPlainText() != text:
+                    label.setText(text)
+            else:
+                label = pg.TextItem(
+                    text=text,
+                    color=(218, 230, 255, 225),
+                    anchor=(-0.28, 0.62),
+                )
+                label.setFont(label_font)
+                label.setZValue(22)
+                self.plot_widget.addItem(label)
+                self.bayer_label_items.append(label)
             label.setPos(x_value, y_value)
-            self.plot_widget.addItem(label)
-            self.bayer_label_items.append(label)
+        self.remove_bayer_labels(keep=len(accepted))
 
     def add_reference_grid(self, frame_altaz, is_local):
         projected = self.projection_combo.currentIndex() in (1, 3, 4)
@@ -3699,11 +4287,11 @@ class MainWindow(QMainWindow):
 
             self.add_curve(
                 minor_x, minor_y,
-                pg.mkPen(color=(100, 120, 140, 35), width=0.4),
+                pg.mkPen(color=AZIMUTH_MINOR_COLOR, width=0.35),
             )
             self.add_curve(
                 major_x, major_y,
-                pg.mkPen(color=(120, 145, 165, 80), width=0.7),
+                pg.mkPen(color=AZIMUTH_MAJOR_COLOR, width=0.55),
             )
 
             az_samples = np.linspace(0, 360, 361)
@@ -3713,24 +4301,18 @@ class MainWindow(QMainWindow):
                 elif altitude < 0:
                     color, width, z_value = (165, 120, 80, 75), 0.65, 9
                 elif altitude % 30 == 0:
-                    color, width, z_value = (235, 165, 80, 160), 1.05, 11
+                    color, width, z_value = ALTITUDE_MAJOR_COLOR, 1.25, 11
                 else:
-                    color, width, z_value = (220, 150, 75, 135), 0.9, 10
+                    color, width, z_value = ALTITUDE_MINOR_COLOR, 0.9, 10
                 circle_az = self.local_azimuth(az_samples)
                 cx, cy = self.project_local(circle_az, np.full_like(circle_az, altitude))
-
-                res_x, res_y = [], []
-                for i in range(len(cx) - 1):
-                    if projected:
-                        append_projected_segment(
-                            res_x, res_y, cx[i], cy[i], cx[i+1], cy[i+1],
-                            self.projected_segment_limit(),
-                        )
-                    else:
-                        append_sky_segment(res_x, res_y, cx[i], cy[i], cx[i+1], cy[i+1])
+                res_x, res_y = self.segments(cx, cy)
                 line_style = (
                     Qt.PenStyle.DotLine if altitude < 0
-                    else Qt.PenStyle.SolidLine
+                    else (
+                        Qt.PenStyle.SolidLine if altitude % 30 == 0
+                        else Qt.PenStyle.DashLine
+                    )
                 )
                 self.add_curve(
                     res_x, res_y,
@@ -3750,14 +4332,9 @@ class MainWindow(QMainWindow):
             samples = np.linspace(0, 360, 361)
             x, y = self.project_global(samples, np.full_like(samples, dec))
             target_x, target_y = (major_x, major_y) if dec % 20 == 0 else (minor_x, minor_y)
-            for i in range(len(x)-1):
-                if projected:
-                    append_projected_segment(
-                        target_x, target_y, x[i], y[i], x[i+1], y[i+1],
-                        self.projected_segment_limit(),
-                    )
-                else:
-                    append_sky_segment(target_x, target_y, x[i], y[i], x[i+1], y[i+1])
+            segment_x, segment_y = self.segments(x, y)
+            target_x.extend(segment_x.tolist())
+            target_y.extend(segment_y.tolist())
         self.add_curve(minor_x, minor_y, pg.mkPen(color=(100, 120, 140, 45), width=0.45))
         self.add_curve(major_x, major_y, pg.mkPen(color=(150, 170, 190, 100), width=0.9))
 
@@ -3771,20 +4348,8 @@ class MainWindow(QMainWindow):
 
         if is_local:
             ra = np.linspace(0, 360, 361)
-            dec = np.zeros_like(ra)
-            az, alt = self.transform_coords(ra, dec, frame_altaz)
-            az = self.local_azimuth(az)
-            equator_x, equator_y = [], []
-            for i in range(len(az) - 1):
-                line_x, line_y = self.project_local([az[i], az[i + 1]], [alt[i], alt[i + 1]])
-                if self.projection_combo.currentIndex() in (1, 3, 4):
-                    append_projected_segment(
-                        equator_x, equator_y,
-                        line_x[0], line_y[0], line_x[1], line_y[1],
-                        self.projected_segment_limit(),
-                    )
-                else:
-                    append_sky_segment(equator_x, equator_y, line_x[0], line_y[0], line_x[1], line_y[1])
+            line_x, line_y = self.project_sky(ra, np.zeros_like(ra), frame_altaz, True)
+            equator_x, equator_y = self.segments(line_x, line_y)
             self.add_curve(equator_x, equator_y, equator_pen, 4)
         else:
             equator_ra = np.linspace(0, 360, 361)
@@ -3806,39 +4371,51 @@ class MainWindow(QMainWindow):
             np.sin(obliquity) * np.sin(np.radians(longitude))
         ))
 
-        if is_local:
-            az, alt = self.transform_coords(ecliptic_ra, ecliptic_dec, frame_altaz)
-            az = self.local_azimuth(az)
-            ecliptic_x, ecliptic_y = [], []
-            for i in range(len(az) - 1):
-                line_x, line_y = self.project_local([az[i], az[i + 1]], [alt[i], alt[i + 1]])
-                if self.projection_combo.currentIndex() in (1, 3, 4):
-                    append_projected_segment(
-                        ecliptic_x, ecliptic_y,
-                        line_x[0], line_y[0], line_x[1], line_y[1],
-                        self.projected_segment_limit(),
-                    )
-                else:
-                    append_sky_segment(ecliptic_x, ecliptic_y, line_x[0], line_y[0], line_x[1], line_y[1])
-        else:
-            projected_x, projected_y = self.project_global(ecliptic_ra, ecliptic_dec)
-            ecliptic_x, ecliptic_y = [], []
-            for index in range(len(projected_x) - 1):
-                if self.projection_combo.currentIndex() in (1, 3, 4):
-                    append_projected_segment(
-                        ecliptic_x, ecliptic_y,
-                        projected_x[index], projected_y[index],
-                        projected_x[index + 1], projected_y[index + 1],
-                        self.projected_segment_limit(),
-                    )
-                else:
-                    append_sky_segment(
-                        ecliptic_x, ecliptic_y,
-                        projected_x[index], projected_y[index],
-                        projected_x[index + 1], projected_y[index + 1],
-                    )
+        projected_x, projected_y = self.project_sky(
+            ecliptic_ra, ecliptic_dec, frame_altaz, is_local
+        )
+        ecliptic_x, ecliptic_y = self.segments(projected_x, projected_y)
 
         self.add_curve(ecliptic_x, ecliptic_y, ecliptic_pen, 4)
+
+    def pair_segments(self, x1, y1, x2, y2, max_step=None):
+        """Seam-safe independent segments (x1, y1) → (x2, y2)."""
+        if self.projection_combo.currentIndex() in (1, 3, 4):
+            return projected_segments(
+                x1, y1, x2, y2,
+                self.projected_segment_limit() if max_step is None else max_step,
+            )
+        return sky_segments(x1, y1, x2, y2)
+
+    def refresh_view_layers(self):
+        """Rebuild only layers that depend on the visible window.
+
+        Raster fills, catalogue markers culled to the view and Bayer labels are
+        refreshed after panning or zooming settles, without the full redraw.
+        """
+        state = self.render_state
+        if state is None:
+            return
+        for item in self.view_layer_items:
+            try:
+                self.plot_widget.removeItem(item)
+            except (RuntimeError, ValueError):
+                pass
+        self.view_layer_items = []
+        view_box = self.plot_widget.getViewBox()
+        first_new = len(view_box.addedItems)
+        if state["is_local"]:
+            self.add_below_horizon_shading()
+        self.add_milky_way_fill(state["frame_altaz"], state["is_local"])
+        self.add_deep_sky_objects(state["frame_altaz"], state["is_local"])
+        self.add_visible_comets(
+            state["eval_time"], state["frame_altaz"], state["is_local"]
+        )
+        self.add_bright_asteroids(
+            state["eval_time"], state["frame_altaz"], state["is_local"]
+        )
+        self.view_layer_items = list(view_box.addedItems[first_new:])
+        self.refresh_bayer_labels()
 
     def redraw(self):
         self.plot_widget.clear()
@@ -3846,17 +4423,20 @@ class MainWindow(QMainWindow):
         self.preview_fields = []
         self.bayer_label_items = []
         self.bayer_label_data = []
-        
-        qdt = self.time_edit.dateTime().toPyDateTime()
-        eval_time = Time(qdt)
+        self.view_layer_items = []
+
+        eval_time = self.map_time()
         obs_location = OBSERVATORIES[self.obs_combo.currentText()]
         frame_altaz = AltAz(obstime=eval_time, location=obs_location)
         is_local = self.view_mode_combo.currentIndex() == 1
+        projection = self.projection_combo.currentIndex()
 
         # 1. Slunce a Měsíc
         sun = get_sun(eval_time)
         moon = get_body("moon", eval_time)
-        sun_altitude_observer = float(sun.transform_to(frame_altaz).alt.deg)
+        self.sun_radec = (float(sun.ra.deg), float(sun.dec.deg))
+        sun_altaz = sun.transform_to(frame_altaz)
+        sun_altitude_observer = float(sun_altaz.alt.deg)
         moon_altitude_observer = float(moon.transform_to(frame_altaz).alt.deg)
         moon_phase, moon_age = moon_phase_details(sun, moon, eval_time)
         self.update_solar_system_readout(
@@ -3870,10 +4450,9 @@ class MainWindow(QMainWindow):
         )
 
         if is_local:
-            sun_x, sun_y = self.transform_coords(sun.ra.deg, sun.dec.deg, frame_altaz)
-            sun_altitude = float(sun_y[0])
-            self.local_sun_azimuth = float(sun_x[0])
-            if self.projection_combo.currentIndex() == 4:
+            sun_altitude = sun_altitude_observer
+            self.local_sun_azimuth = float(sun_altaz.az.deg)
+            if projection == 4:
                 observatory = self.obs_combo.currentText()
                 if self.local_mercator_observatory != observatory:
                     facing_azimuth, center_altitude = (
@@ -3886,75 +4465,65 @@ class MainWindow(QMainWindow):
                     self.local_azimuth(self.local_mercator_center_azimuth)
                 )
                 self.mercator_center_altitude = self.local_mercator_center_altitude
-            sun_x = self.local_azimuth(sun_x)
-            sun_x, sun_y = self.project_local(sun_x, sun_y)
+            sun_x, sun_y = self.project_local(
+                self.local_azimuth([self.local_sun_azimuth]), [sun_altitude]
+            )
             lower_altitude = max(-30.0, sun_altitude - 10.0)
-            local_lower_altitude = lower_altitude
-            if self.projection_combo.currentIndex() == 1:
-                self.plot_widget.setXRange(-3, 3, padding=0)
-                self.plot_widget.setYRange(-1.5, 1.5, padding=0)
-            elif self.projection_combo.currentIndex() == 3:
-                radius = 2.0 * np.tan(np.radians((90.0 - lower_altitude) / 2.0))
-                radius *= 1.04
-                self.plot_widget.setXRange(-radius, radius, padding=0)
-                self.plot_widget.setYRange(-radius, radius, padding=0)
-            elif self.projection_combo.currentIndex() == 4:
-                # MER si zachovává rozsah při běžném plynulém posouvání.
-                pass
-            else:
-                _, projected_limits = self.project_local(
-                    [180.0, 180.0], [lower_altitude, 90.0]
-                )
-                self.plot_widget.setYRange(
-                    float(projected_limits[0]),
-                    float(projected_limits[1]),
-                    padding=0,
-                )
+            # Automatický výřez jen po přepnutí pohledu/projekce nebo resetu;
+            # změna času tak nezahodí ruční posun a přiblížení.
+            if self.auto_range_pending:
+                if projection == 1:
+                    self.plot_widget.setXRange(-3, 3, padding=0)
+                    self.plot_widget.setYRange(-1.5, 1.5, padding=0)
+                elif projection == 3:
+                    radius = 2.0 * np.tan(np.radians((90.0 - lower_altitude) / 2.0))
+                    radius *= 1.04
+                    self.plot_widget.setXRange(-radius, radius, padding=0)
+                    self.plot_widget.setYRange(-radius, radius, padding=0)
+                elif projection == 4:
+                    # MER si zachovává rozsah při běžném plynulém posouvání.
+                    pass
+                else:
+                    _, projected_limits = self.project_local(
+                        [180.0, 180.0], [lower_altitude, 90.0]
+                    )
+                    self.plot_widget.setYRange(
+                        float(projected_limits[0]),
+                        float(projected_limits[1]),
+                        padding=0,
+                    )
         else:
             self.local_sun_azimuth = None
             sun_altitude = float(sun.dec.deg)
             sun_x, sun_y = self.project_global([sun.ra.deg], [sun.dec.deg])
+        self.auto_range_pending = False
+        self.render_state = {
+            "eval_time": eval_time,
+            "frame_altaz": frame_altaz,
+            "is_local": is_local,
+        }
 
-        if is_local:
-            self.add_below_horizon_shading()
         self.add_milky_way(frame_altaz, is_local)
         self.add_reference_grid(frame_altaz, is_local)
         self.add_reference_circles(frame_altaz, is_local)
         self.add_constellation_boundaries(frame_altaz, is_local)
-        self.add_deep_sky_objects(frame_altaz, is_local)
 
-        if self.stars:
-            star_ra = np.array([star[0] for star in self.stars])
-            star_dec = np.array([star[1] for star in self.stars])
-            star_mag = np.array([star[2] for star in self.stars])
-            star_bayer = np.array([
-                star[3] if len(star) > 3 else "" for star in self.stars
-            ], dtype=object)
-            star_colors = np.array([
-                star[5] if len(star) > 5 else (225, 232, 255, 235)
-                for star in self.stars
-            ], dtype=object)
-            catalog_visible = star_mag <= self.visible_star_magnitude()
-            if is_local:
-                star_az, star_alt = self.transform_coords(
-                    star_ra[catalog_visible], star_dec[catalog_visible], frame_altaz
-                )
-                star_x, star_y = self.project_local(
-                    self.local_azimuth(star_az), star_alt
-                )
-            else:
-                star_x, star_y = self.project_global(
-                    star_ra[catalog_visible], star_dec[catalog_visible]
-                )
-            visible_mag = star_mag[catalog_visible]
-            visible_bayer = star_bayer[catalog_visible]
-            visible_colors = star_colors[catalog_visible]
+        stars = self.star_arrays
+        if stars is not None:
+            catalog_visible = stars["mag"] <= self.visible_star_magnitude()
+            star_x, star_y = self.project_sky(
+                stars["ra"][catalog_visible], stars["dec"][catalog_visible],
+                frame_altaz, is_local,
+            )
+            visible_mag = stars["mag"][catalog_visible]
+            visible_bayer = stars["bayer"][catalog_visible]
+            visible_brushes = stars["brush"][catalog_visible]
             finite = np.isfinite(star_x) & np.isfinite(star_y)
-            star_x = np.asarray(star_x)[finite]
-            star_y = np.asarray(star_y)[finite]
+            star_x = star_x[finite]
+            star_y = star_y[finite]
             visible_mag = visible_mag[finite]
             visible_bayer = visible_bayer[finite]
-            visible_colors = visible_colors[finite]
+            visible_brushes = visible_brushes[finite]
 
             star_size = np.clip(9.2 - 1.55 * visible_mag, 1.6, 9.5)
             bright = visible_mag <= 2.5
@@ -3973,7 +4542,7 @@ class MainWindow(QMainWindow):
                 x=star_x,
                 y=star_y,
                 size=star_size,
-                brush=[pg.mkBrush(tuple(color)) for color in visible_colors],
+                brush=list(visible_brushes),
                 pen=pg.mkPen((245, 250, 255, 120), width=0.35),
             )
             star_item.setZValue(18)
@@ -3985,13 +4554,10 @@ class MainWindow(QMainWindow):
                 visible_mag.copy(),
                 visible_bayer.copy(),
             )
-            self.refresh_bayer_labels()
 
         if np.all(np.isfinite(sun_x)) and np.all(np.isfinite(sun_y)):
             self.plot_widget.addItem(pg.ScatterPlotItem(x=sun_x, y=sun_y, size=18, brush='#ffcc00', pen=pg.mkPen('w', width=1.5)))
         self.add_planets(eval_time, frame_altaz, is_local, moon=moon)
-        self.add_visible_comets(eval_time, frame_altaz, is_local)
-        self.add_bright_asteroids(eval_time, frame_altaz, is_local)
 
         # 2. Elongační kružnice kolem Slunce (20° až 70°)
         angles = np.linspace(0, 2*np.pi, 120)
@@ -4003,70 +4569,35 @@ class MainWindow(QMainWindow):
             60: ((255, 110, 180, 190), Qt.PenStyle.DashDotDotLine),
             70: ((180, 140, 255, 200), Qt.PenStyle.SolidLine),
         }
+        s_ra = np.radians(sun.ra.deg)
+        s_dec = np.radians(sun.dec.deg)
         for elongation in [20, 30, 40, 50, 60, 70]:
             e_rad = np.radians(elongation)
-            s_ra = np.radians(sun.ra.deg)
-            s_dec = np.radians(sun.dec.deg)
-
             dec_c = np.arcsin(np.sin(s_dec) * np.cos(e_rad) + np.cos(s_dec) * np.sin(e_rad) * np.cos(angles))
             # Ošetření přetečení deklinace mimo rozsah [-90, +90]
             dec_deg_c = np.clip(np.degrees(dec_c), -89.9, 89.9)
-            
             ra_c = s_ra + np.arctan2(np.sin(angles) * np.sin(e_rad) * np.cos(s_dec), np.cos(e_rad) - np.sin(s_dec) * np.sin(dec_c))
             ra_deg_c = np.degrees(ra_c) % 360
-
-            if is_local:
-                x_c, y_c = self.transform_coords(ra_deg_c, dec_deg_c, frame_altaz)
-                x_c = self.local_azimuth(x_c)
-                projected_x, projected_y = [], []
-                for i in range(len(x_c) - 1):
-                    line_x, line_y = self.project_local(
-                        [x_c[i], x_c[i + 1]], [y_c[i], y_c[i + 1]])
-                    if self.projection_combo.currentIndex() in (1, 3, 4):
-                        append_projected_segment(
-                            projected_x, projected_y,
-                            line_x[0], line_y[0], line_x[1], line_y[1],
-                            self.projected_segment_limit(),
-                        )
-                    else:
-                        append_sky_segment(
-                            projected_x, projected_y,
-                            line_x[0], line_y[0], line_x[1], line_y[1])
-                x_c, y_c = np.asarray(projected_x), np.asarray(projected_y)
-            else:
-                raw_x, raw_y = self.project_global(ra_deg_c, dec_deg_c)
-                projected_x, projected_y = [], []
-                for index in range(len(raw_x) - 1):
-                    if self.projection_combo.currentIndex() in (1, 3, 4):
-                        append_projected_segment(
-                            projected_x, projected_y,
-                            raw_x[index], raw_y[index],
-                            raw_x[index + 1], raw_y[index + 1],
-                            self.projected_segment_limit(),
-                        )
-                    else:
-                        append_sky_segment(
-                            projected_x, projected_y,
-                            raw_x[index], raw_y[index],
-                            raw_x[index + 1], raw_y[index + 1],
-                        )
-                x_c, y_c = np.asarray(projected_x), np.asarray(projected_y)
-
+            raw_x, raw_y = self.project_sky(ra_deg_c, dec_deg_c, frame_altaz, is_local)
+            x_c, y_c = self.segments(raw_x, raw_y)
             if len(x_c) > 0:
                 color, style = elongation_styles[elongation]
-                self.plot_widget.addItem(pg.PlotCurveItem(x=x_c, y=y_c, pen=pg.mkPen(color=color, width=1.4, style=style)))
+                circle_item = pg.PlotCurveItem(x=x_c, y=y_c, pen=pg.mkPen(color=color, width=1.4, style=style), connect="finite")
+                self.plot_widget.addItem(circle_item)
 
         self.add_kreutz_corridors(eval_time, frame_altaz, is_local)
 
-        # 3. Zorná pole z archivu
-        if self.polygons:
+        # 3. Zorná pole MPC
+        polygons = self.polygon_arrays
+        if polygons is not None:
             limit_mag = self.mag_spin.value()
-            x_all, y_all = [], []
-            visible_polygons = [polygon for polygon in self.polygons if polygon[2] >= limit_mag]
+            visible = polygons["mag"] >= limit_mag
+            visible_count = int(np.count_nonzero(visible))
+            x_all = y_all = np.empty(0)
 
-            if self.projection_combo.currentIndex() == 4 and visible_polygons:
+            if projection == 4 and visible_count:
                 cache_key = (
-                    id(self.polygons), len(visible_polygons), float(limit_mag), is_local,
+                    id(polygons), visible_count, float(limit_mag), is_local,
                     self.obs_combo.currentText(), eval_time.utc.isot,
                     round(self.mercator_center_ra, 9), round(self.mercator_center_dec, 9),
                     round(self.mercator_center_azimuth, 9),
@@ -4075,20 +4606,11 @@ class MainWindow(QMainWindow):
                 if self.mer_polygon_cache is not None and self.mer_polygon_cache[0] == cache_key:
                     px, py = self.mer_polygon_cache[1], self.mer_polygon_cache[2]
                 else:
-                    ra_matrix = np.asarray([polygon[0] for polygon in visible_polygons], dtype=float)
-                    dec_matrix = np.asarray([polygon[1] for polygon in visible_polygons], dtype=float)
-                    if is_local:
-                        shape = ra_matrix.shape
-                        azimuth, altitude = self.transform_coords(
-                            ra_matrix.ravel(), dec_matrix.ravel(), frame_altaz
-                        )
-                        altitude = np.asarray(altitude).reshape(shape)
-                        azimuth = np.asarray(azimuth).reshape(shape)
-                        px, py = self.project_local(self.local_azimuth(azimuth), altitude)
-                    else:
-                        px, py = self.project_global(ra_matrix, dec_matrix)
+                    px, py = self.project_sky(
+                        polygons["ra"][visible], polygons["dec"][visible],
+                        frame_altaz, is_local,
+                    )
                     self.mer_polygon_cache = (cache_key, px, py)
-                shape = px.shape
 
                 x_range, y_range = self.plot_widget.getViewBox().viewRange()
                 x_margin = abs(x_range[1] - x_range[0]) * 0.12
@@ -4107,101 +4629,54 @@ class MainWindow(QMainWindow):
                 valid_edges = np.all(np.isfinite(edge_x) & np.isfinite(edge_y), axis=1)
                 x_all = edge_x[valid_edges].ravel()
                 y_all = edge_y[valid_edges].ravel()
-
-            transformed_vertices = None
-            if self.projection_combo.currentIndex() != 4 and is_local and visible_polygons:
-                all_ra = np.concatenate([np.asarray(polygon[0]) for polygon in visible_polygons])
-                all_dec = np.concatenate([np.asarray(polygon[1]) for polygon in visible_polygons])
-                transformed_vertices = self.transform_coords(all_ra, all_dec, frame_altaz)
-                vertex_offset = 0
-
-            for ra, dec, mag in ([] if self.projection_combo.currentIndex() == 4 else visible_polygons):
-                ra_arr = np.array(ra)
-                dec_arr = np.array(dec)
-
-                if is_local:
-                    vertex_count = len(ra_arr)
-                    az = transformed_vertices[0][vertex_offset:vertex_offset + vertex_count]
-                    alt = transformed_vertices[1][vertex_offset:vertex_offset + vertex_count]
-                    vertex_offset += vertex_count
-                    px, py = self.project_local(self.local_azimuth(az), alt)
-                else:
-                    px, py = self.project_global(ra_arr, dec_arr)
-
-                for i in range(len(px) - 1):
-                    if self.projection_combo.currentIndex() in (1, 3, 4):
-                        if (abs(px[i + 1] - px[i]) < 0.35 and
-                                abs(py[i + 1] - py[i]) < 0.35):
-                            x_all.extend([px[i], px[i + 1], np.nan])
-                            y_all.extend([py[i], py[i + 1], np.nan])
-                    else:
-                        append_sky_segment(x_all, y_all, px[i], py[i], px[i+1], py[i+1])
+            elif visible_count:
+                px, py = self.project_sky(
+                    polygons["ra"][visible], polygons["dec"][visible],
+                    frame_altaz, is_local,
+                )
+                x_all, y_all = polyline_segments(
+                    px, py, projection in (1, 3, 4), 0.35
+                )
 
             if len(x_all) > 0:
-                if self.projection_combo.currentIndex() == 4:
+                if projection == 4:
                     poly_item = pg.PlotCurveItem(
                         x=np.asarray(x_all), y=np.asarray(y_all),
-                        pen=pg.mkPen(color=(0, 180, 220, 40), width=0.5),
+                        pen=pg.mkPen(
+                            color=SKYCOV_FOOTPRINT_COLOR, width=0.35
+                        ),
                         connect="pairs", skipFiniteCheck=True,
                     )
                     poly_item.setSegmentedLineMode("on")
-                    poly_item.setCacheMode(
-                        QGraphicsItem.CacheMode.DeviceCoordinateCache,
-                        QSize(4096, 4096),
-                    )
                 else:
                     poly_item = pg.PlotCurveItem(
-                        x=np.array(x_all), y=np.array(y_all),
-                        pen=pg.mkPen(color=(0, 180, 220, 40), width=0.5),
+                        x=x_all, y=y_all,
+                        pen=pg.mkPen(
+                            color=SKYCOV_FOOTPRINT_COLOR, width=0.35
+                        ),
                         connect="finite",
                     )
+                if projection == 4:
+                    # MER: při posunu se jen přesune hotová bitmapa. V ostatních
+                    # projekcích cache nepoužíváme – u čar s 6% krytím by
+                    # kvantizace v bitmapě změnila jejich odstín.
+                    enable_pan_cache(poly_item)
                 poly_item.setZValue(1)
                 self.plot_widget.addItem(poly_item)
 
         # 4. Souhvězdí
-        if self.const_lines:
-            c_x, c_y = [], []
-            segments = []
-            for line in self.const_lines:
-                for i in range(len(line) - 1):
-                    p1, p2 = line[i], line[i+1]
-                    segments.append((p1[0] % 360, p1[1], p2[0] % 360, p2[1]))
-
-            if segments:
-                segment_array = np.asarray(segments, dtype=float)
-                ra_pairs = segment_array[:, (0, 2)]
-                dec_pairs = segment_array[:, (1, 3)]
-                if is_local:
-                    azimuth, altitude = self.transform_coords(
-                        ra_pairs.ravel(), dec_pairs.ravel(), frame_altaz
-                    )
-                    line_x, line_y = self.project_local(
-                        self.local_azimuth(np.asarray(azimuth).reshape(-1, 2)),
-                        np.asarray(altitude).reshape(-1, 2),
-                    )
-                else:
-                    line_x, line_y = self.project_global(ra_pairs, dec_pairs)
-
-                projected = self.projection_combo.currentIndex() in (1, 3, 4)
-                for index in range(len(segments)):
-                    if projected:
-                        append_projected_segment(
-                            c_x, c_y,
-                            line_x[index, 0], line_y[index, 0],
-                            line_x[index, 1], line_y[index, 1],
-                            self.projected_segment_limit(),
-                        )
-                    else:
-                        append_sky_segment(
-                            c_x, c_y,
-                            line_x[index, 0], line_y[index, 0],
-                            line_x[index, 1], line_y[index, 1],
-                        )
-
-            if c_x:
+        segments = self.const_segment_cache
+        if segments is not None and len(segments):
+            ra_pairs = segments[:, (0, 2)]
+            dec_pairs = segments[:, (1, 3)]
+            line_x, line_y = self.project_sky(ra_pairs, dec_pairs, frame_altaz, is_local)
+            c_x, c_y = self.pair_segments(
+                line_x[:, 0], line_y[:, 0], line_x[:, 1], line_y[:, 1]
+            )
+            if len(c_x):
                 const_item = pg.PlotCurveItem(
-                    x=np.array(c_x),
-                    y=np.array(c_y),
+                    x=c_x,
+                    y=c_y,
                     pen=pg.mkPen(color=(105, 220, 145, 155), width=0.9),
                     connect="finite",
                 )
@@ -4210,6 +4685,9 @@ class MainWindow(QMainWindow):
 
         # Aktivní plán je červený, zapnuté archivní plány mají tlumené barvy.
         self.add_planner_overlays(frame_altaz, is_local)
+
+        # Vrstvy závislé na výřezu (rastry, katalogové značky, popisky).
+        self.refresh_view_layers()
 
 
 if __name__ == "__main__":

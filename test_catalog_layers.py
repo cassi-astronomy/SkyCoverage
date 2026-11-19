@@ -123,3 +123,81 @@ def test_planet_layer_uses_short_labels_and_omits_pluto():
     assert [style[0] for style in PLANET_STYLES.values()] == [
         "Me", "Ve", "Ma", "Ju", "Sa", "Ur", "Ne",
     ]
+
+
+def _mpcorb_line(packed, h, e, a, readable, mean_anomaly="26.80968"):
+    line = list(" " * 195)
+
+    def put(start, end, value):
+        line[start:end] = list(str(value).rjust(end - start))
+
+    put(0, 7, packed)
+    put(8, 13, h)
+    put(14, 19, "0.15")
+    line[20:25] = list("K25BL")
+    put(26, 35, mean_anomaly)
+    put(37, 46, "151.53712")
+    put(48, 57, "103.70232")
+    put(59, 68, "7.14406")
+    put(70, 79, e)
+    put(92, 103, a)
+    line[166:166 + len(readable)] = list(readable)
+    return "".join(line).rstrip() + "\n"
+
+
+def test_asteroid_parser_keeps_names_and_unnumbered_objects(tmp_path):
+    path = tmp_path / "mpcorb.txt"
+    path.write_text(
+        _mpcorb_line("00004", "3.25", "0.0901676", "2.3615413", "(4) Vesta")
+        + _mpcorb_line("K24A01B", "12.10", "0.1500000", "2.5000000", "2024 AB1"),
+        encoding="ascii",
+    )
+    vesta, unnumbered = SupplementCatalogReader.load_bright_asteroids(path)
+    assert (vesta["number"], vesta["name"]) == (4, "Vesta")
+    assert (unnumbered["number"], unnumbered["name"]) == (None, "2024 AB1")
+    label = SupplementCatalogReader.asteroid_label
+    assert label(vesta) == "4"
+    assert label(vesta, detailed=True, magnitude=6.04) == "4 Vesta  6.0m"
+    assert label(unnumbered, detailed=True, magnitude=13.96) == "2024 AB1  14.0m"
+
+
+def test_mpcorb_filter_keeps_only_orbits_that_can_reach_limit(tmp_path):
+    import gzip as gzip_module
+
+    bright_inner = _mpcorb_line("00004", "3.25", "0.0901676", "2.3615413", "(4) Vesta")
+    faint_inner = _mpcorb_line("99999", "16.00", "0.1000000", "2.3000000", "(99999) Faint")
+    faint_outer = _mpcorb_line("88888", "11.50", "0.0500000", "3.2000000", "(88888) Outer")
+    gz_path = tmp_path / "MPCORB.DAT.gz"
+    with gzip_module.open(gz_path, "wt", encoding="ascii") as output:
+        output.write("MPCORB header\n-----------\n")
+        output.write(bright_inner + faint_inner + faint_outer)
+    output_path = tmp_path / "bright.txt"
+    count = SupplementCatalogReader.write_bright_mpcorb(
+        str(gz_path), str(output_path), 14.5
+    )
+    assert count == 1
+    objects = SupplementCatalogReader.load_bright_asteroids(output_path)
+    assert [item["name"] for item in objects] == ["Vesta"]
+
+
+def test_vectorised_asteroid_propagation_matches_scalar_version():
+    from orbital_mechanics import (
+        asteroid_heliocentric_ecliptic, asteroid_heliocentric_ecliptic_array,
+        build_asteroid_arrays, calendar_jd,
+    )
+
+    assert calendar_jd(2000, 1, 1.5) == 2451545.0
+    assert calendar_jd(2025, 11, 21) == Time("2025-11-21").jd
+    elements = [
+        {"a": 2.36, "e": 0.09, "epoch_jd": 2461000.5, "mean_anomaly": 26.8,
+         "arg_peri": 151.5, "node": 103.7, "inclination": 7.1, "h": 3.2, "g": 0.15},
+        {"a": 1.46, "e": 0.22, "epoch_jd": 2461000.5, "mean_anomaly": 310.0,
+         "arg_peri": 178.8, "node": 304.3, "inclination": 10.8, "h": 10.4, "g": 0.15},
+    ]
+    vectors, radii = asteroid_heliocentric_ecliptic_array(
+        build_asteroid_arrays(elements), 2461150.25
+    )
+    for index, element in enumerate(elements):
+        vector, radius = asteroid_heliocentric_ecliptic(element, 2461150.25)
+        assert np.allclose(vectors[index], vector, atol=1e-10)
+        assert np.isclose(radii[index], radius)

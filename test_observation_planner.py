@@ -9,6 +9,7 @@ from observation_planner import (
     estimate_sequence_duration,
     export_plan_text,
     field_outline,
+    format_archive_timestamp,
     format_duration,
     generate_exposure_script,
     make_mosaic,
@@ -55,6 +56,17 @@ class ObservationPlannerTests(unittest.TestCase):
         self.assertIn("loopdisable filter=R for 12", script)
         self.assertEqual(script.count("T0.WOFFS="), 2)
         self.assertIn(" E 45 ", script)
+
+    def test_dither_is_centred_on_every_field_including_first(self):
+        profile = {"width_deg": 15.0, "height_deg": 15.0, "rotation_deg": 0.0,
+                   "dither_deg": 0.1}
+        fields = [
+            {"ra_deg": 237.3735, "dec_deg": 49.0922, "profile": profile},
+            {"ra_deg": 225.8235, "dec_deg": 62.5602, "profile": profile},
+        ]
+        script = generate_exposure_script(fields, "N", 60, 16)
+        self.assertIn("T0.WOFFS=(rand(-0.050,0.050),rand(-0.050,0.050))", script)
+        self.assertIn("T0.WOFFS=(rand(-11.600,-11.500),rand(13.418,13.518))", script)
 
     def test_horizon_grid_spacing_accounts_for_tilted_eq_sensor(self):
         horizontal, vertical = safe_horizon_grid_steps(10, 5, 0, 10)
@@ -120,6 +132,22 @@ class ObservationPlannerTests(unittest.TestCase):
             store.save()
             loaded = PlannerStore(str(path))
             self.assertEqual(loaded.data["profiles"][0]["rotation_deg"], 42.0)
+
+    def test_store_remembers_time_zone_setting(self):
+        with tempfile.TemporaryDirectory(dir=Path(__file__).parent) as directory:
+            path = Path(directory) / "planner.json"
+            store = PlannerStore(str(path))
+            store.data["settings"]["time_zone"] = "SELČ"
+            store.save()
+            loaded = PlannerStore(str(path))
+            self.assertEqual(loaded.data["settings"]["time_zone"], "SELČ")
+
+    def test_archive_timestamp_is_compact_and_readable(self):
+        self.assertEqual(
+            format_archive_timestamp("2026-11-10T23:45:12+00:00"),
+            "2026-11-10",
+        )
+        self.assertEqual(format_archive_timestamp("neznámé"), "neznámé")
 
 
 if __name__ == "__main__":

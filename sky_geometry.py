@@ -294,3 +294,138 @@ def milky_way_outer_envelope(contours, sample_count=721):
     if not np.all(np.isfinite(lower_dec) & np.isfinite(upper_dec)):
         return None
     return sample_ra, lower_dec, upper_dec
+
+
+def sky_segments(x1, y1, x2, y2):
+    """Vectorised equivalent of repeated :func:`append_sky_segment` calls.
+
+    Returns ``(x, y)`` arrays with NaN separators.  Segments crossing the
+    0°/360° seam are split at the boundary exactly like the scalar helper, so
+    no false chord is drawn across the whole map.
+    """
+    x1 = np.asarray(x1, dtype=float).ravel()
+    y1 = np.asarray(y1, dtype=float).ravel()
+    x2 = np.asarray(x2, dtype=float).ravel()
+    y2 = np.asarray(y2, dtype=float).ravel()
+    if x1.size == 0:
+        return np.empty(0), np.empty(0)
+    finite = (
+        np.isfinite(x1) & np.isfinite(y1) & np.isfinite(x2) & np.isfinite(y2)
+    )
+    x1, y1, x2, y2 = x1[finite], y1[finite], x2[finite], y2[finite]
+    delta = x2 - x1
+    wraps = np.abs(delta) > 180.0
+    forward = delta > 0
+    shifted_x2 = np.where(forward, x2 - 360.0, x2 + 360.0)
+    boundary = np.where(forward, 0.0, 360.0)
+    opposite = np.where(forward, 360.0, 0.0)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        fraction = (boundary - x1) / (shifted_x2 - x1)
+    boundary_y = y1 + fraction * (y2 - y1)
+
+    count = x1.size
+    out_x = np.full((count, 6), np.nan)
+    out_y = np.full((count, 6), np.nan)
+    out_x[:, 0], out_y[:, 0] = x1, y1
+    out_x[:, 1] = np.where(wraps, boundary, x2)
+    out_y[:, 1] = np.where(wraps, boundary_y, y2)
+    out_x[:, 3], out_y[:, 3] = opposite, boundary_y
+    out_x[:, 4], out_y[:, 4] = x2, y2
+    keep = np.ones((count, 6), dtype=bool)
+    keep[:, 3:] = wraps[:, None]
+    return out_x[keep], out_y[keep]
+
+
+def projected_segments(x1, y1, x2, y2, max_step=0.35):
+    """Vectorised equivalent of repeated :func:`append_projected_segment`."""
+    x1 = np.asarray(x1, dtype=float).ravel()
+    y1 = np.asarray(y1, dtype=float).ravel()
+    x2 = np.asarray(x2, dtype=float).ravel()
+    y2 = np.asarray(y2, dtype=float).ravel()
+    with np.errstate(invalid="ignore"):
+        keep = (np.abs(x2 - x1) <= max_step) & (np.abs(y2 - y1) <= max_step)
+    count = int(np.count_nonzero(keep))
+    out_x = np.full((count, 3), np.nan)
+    out_y = np.full((count, 3), np.nan)
+    out_x[:, 0], out_x[:, 1] = x1[keep], x2[keep]
+    out_y[:, 0], out_y[:, 1] = y1[keep], y2[keep]
+    return out_x.ravel(), out_y.ravel()
+
+
+def polyline_segments(x_values, y_values, projected, max_step=0.35):
+    """Split polylines into seam-safe segments.
+
+    ``x_values``/``y_values`` are either 1-D (one polyline) or 2-D with one
+    polyline per row.  ``projected`` selects the projected-plane rule (short
+    segments only) instead of the RA/azimuth seam split.
+    """
+    x_values = np.asarray(x_values, dtype=float)
+    y_values = np.asarray(y_values, dtype=float)
+    if x_values.ndim == 1:
+        x_values = x_values[None, :]
+        y_values = y_values[None, :]
+    if x_values.shape[-1] < 2:
+        return np.empty(0), np.empty(0)
+    x1, x2 = x_values[:, :-1], x_values[:, 1:]
+    y1, y2 = y_values[:, :-1], y_values[:, 1:]
+    if projected:
+        return projected_segments(x1, y1, x2, y2, max_step)
+    return sky_segments(x1, y1, x2, y2)
+
+
+def unit_vectors(longitude_deg, latitude_deg):
+    """Return Cartesian unit vectors (..., 3) for spherical angles in degrees."""
+    longitude = np.radians(np.asarray(longitude_deg, dtype=float))
+    latitude = np.radians(np.asarray(latitude_deg, dtype=float))
+    cos_latitude = np.cos(latitude)
+    return np.stack((
+        cos_latitude * np.cos(longitude),
+        cos_latitude * np.sin(longitude),
+        np.sin(latitude),
+    ), axis=-1)
+
+
+def vectors_to_angles(vectors):
+    """Return ``(longitude in [0, 360), latitude)`` in degrees for vectors."""
+    vectors = np.asarray(vectors, dtype=float)
+    norm = np.linalg.norm(vectors, axis=-1)
+    norm = np.where(norm > 0.0, norm, 1.0)
+    longitude = np.degrees(np.arctan2(vectors[..., 1], vectors[..., 0])) % 360.0
+    latitude = np.degrees(np.arcsin(np.clip(vectors[..., 2] / norm, -1.0, 1.0)))
+    return longitude, latitude
+
+
+def fit_rotation(source_vectors, target_vectors):
+    """Best-fit orthogonal matrix ``R`` with ``target ≈ R @ source``.
+
+    Orthogonal Procrustes without forcing ``det(R) = +1``: the ICRS → AltAz
+    mapping is a mirror transform, because azimuth grows clockwise (N → E)
+    while right ascension grows counter-clockwise on the sky.
+    """
+    source = np.asarray(source_vectors, dtype=float)
+    target = np.asarray(target_vectors, dtype=float)
+    covariance = target.T @ source
+    left, _, right = np.linalg.svd(covariance)
+    return left @ right
+
+
+def rotate_angles(matrix, longitude_deg, latitude_deg):
+    """Rotate spherical coordinates with a 3×3 matrix; NaN inputs stay NaN."""
+    vectors = unit_vectors(longitude_deg, latitude_deg)
+    rotated = vectors @ np.asarray(matrix, dtype=float).T
+    return vectors_to_angles(rotated)
+
+
+def angular_separation(longitude1, latitude1, longitude2, latitude2):
+    """Great-circle separation in degrees (Vincenty formula, all angles in deg)."""
+    lon1, lat1 = np.radians(longitude1), np.radians(latitude1)
+    lon2, lat2 = np.radians(longitude2), np.radians(latitude2)
+    delta = lon2 - lon1
+    numerator = np.hypot(
+        np.cos(lat2) * np.sin(delta),
+        np.cos(lat1) * np.sin(lat2) - np.sin(lat1) * np.cos(lat2) * np.cos(delta),
+    )
+    denominator = (
+        np.sin(lat1) * np.sin(lat2) + np.cos(lat1) * np.cos(lat2) * np.cos(delta)
+    )
+    return np.degrees(np.arctan2(numerator, denominator))
